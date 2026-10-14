@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     # Cache / cost / limits
     cache_enabled: bool = True
     cache_ttl_seconds: int = 3600
+    # Near-duplicate layer on top of the exact cache (llmops.cache.SemanticCache). Off by default:
+    # it can serve a wrong answer for a question that differs in one material word.
+    semantic_cache_enabled: bool = False
+    semantic_cache_threshold: float = 0.92
     redis_url: str | None = None
     daily_cost_cap_usd: float = 5.0
     rate_limit_per_minute: int = 30

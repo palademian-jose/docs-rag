@@ -13,7 +13,7 @@ from typing import Protocol
 from llmops.pricing import estimate_cost
 from pydantic import BaseModel, Field
 
-from docs_rag.cache import AnswerCache, cache_key
+from docs_rag.cache import AnswerCache, SemanticAnswerCache, cache_key
 from docs_rag.generation.answer import REFUSAL_MESSAGE, Citation, parse_answer
 from docs_rag.generation.prompt import ContextChunk, build_messages
 from docs_rag.ingest.index import Index
@@ -65,6 +65,7 @@ class AskResult(BaseModel):
     latency_ms: float = 0.0
     cost_usd: float = 0.0
     cache_hit: bool = False
+    cache_kind: str | None = None  # "exact" | "semantic" when cache_hit
     confidence: float = 0.0
     retrieved_ids: list[str] = Field(default_factory=list)  # candidate order, for eval metrics
     context_ids: list[str] = Field(default_factory=list)  # what the model actually saw
@@ -73,7 +74,7 @@ class AskResult(BaseModel):
     output_tokens: int = 0
 
     def cacheable(self) -> dict:
-        return self.model_dump(exclude={"trace_id", "latency_ms", "cache_hit"})
+        return self.model_dump(exclude={"trace_id", "latency_ms", "cache_hit", "cache_kind"})
 
 
 class RAGPipeline:
@@ -87,6 +88,7 @@ class RAGPipeline:
         reranker: Reranker | None = None,
         tracer: Tracer | None = None,
         cache: AnswerCache | None = None,
+        semantic_cache: SemanticAnswerCache | None = None,
         cost_cap: DailyCostCap | None = None,
     ) -> None:
         self.index = index
@@ -97,6 +99,9 @@ class RAGPipeline:
         # Every complete() becomes one costed `generate` llm span (llmops.tracing.wrap_client).
         self.llm = wrap_client(llm, self.tracer, name="generate", feature=FEATURE)
         self.cache = cache
+        self.semantic_cache = semantic_cache
+        if semantic_cache is not None:
+            semantic_cache.use_tracer(self.tracer)
         self.cost_cap = cost_cap
 
     @property
@@ -167,6 +172,23 @@ class RAGPipeline:
             )
         return response, cost
 
+    def _cache_lookup(self, question: str, key: str) -> tuple[dict | None, str | None]:
+        """Exact lookup, then the semantic layer (if configured). Returns (payload, kind)."""
+        assert self.cache is not None
+        with self.tracer.span("cache.lookup", "cache", meta={"cache_type": "exact"}) as cs:
+            hit = self.cache.get(key)
+            cs.cache_hit = hit is not None
+            if hit is not None:
+                cs.meta["saved_cost_usd"] = hit.get("cost_usd", 0.0)
+                cs.meta["saved_ms"] = hit.get("_saved_ms")
+        if hit is not None:
+            return hit, "exact"
+        if self.semantic_cache is not None:
+            hit = self.semantic_cache.get(question, self.fingerprint)
+            if hit is not None:
+                return hit, "semantic"
+        return None, None
+
     # -- entry point --------------------------------------------------------------------------
     def ask(
         self, question: str, *, user_id: str = "anon", session_id: str | None = None
@@ -178,15 +200,15 @@ class RAGPipeline:
         ):
             key = cache_key(question, self.fingerprint)
             if self.config.cache_enabled and self.cache is not None:
-                with self.tracer.span("cache.lookup", "cache") as cs:
-                    hit = self.cache.get(key)
-                    cs.cache_hit = hit is not None
+                hit, cache_kind = self._cache_lookup(question, key)
                 if hit is not None:
+                    hit.pop("_saved_ms", None)
                     result = AskResult(**hit, trace_id=trace_id, cache_hit=True)
+                    result.cache_kind = cache_kind
                     result.cost_usd = 0.0
                     result.latency_ms = (time.perf_counter() - start) * 1000
                     root.cache_hit = True
-                    root.meta.update(refused=result.refused, cached=True)
+                    root.meta.update(refused=result.refused, cached=True, cache_kind=cache_kind)
                     return result
 
             if self.cost_cap is not None and not self.cost_cap.allow():
@@ -229,17 +251,28 @@ class RAGPipeline:
 
             if self.cost_cap is not None:
                 self.cost_cap.record(result.cost_usd)
-            if self.config.cache_enabled and self.cache is not None:
-                self.cache.set(key, result.cacheable(), self.config.cache_ttl_seconds)
             result.latency_ms = (time.perf_counter() - start) * 1000
-            root.cost_usd = result.cost_usd
-            root.input_tokens = result.input_tokens
-            root.output_tokens = result.output_tokens
-            root.model = result.model
+            if self.config.cache_enabled and self.cache is not None:
+                payload = {**result.cacheable(), "_saved_ms": round(result.latency_ms, 3)}
+                self.cache.set(key, payload, self.config.cache_ttl_seconds)
+                if self.semantic_cache is not None:
+                    self.semantic_cache.set(
+                        question,
+                        self.fingerprint,
+                        result.cacheable(),
+                        cost_usd=result.cost_usd,
+                        latency_ms=result.latency_ms,
+                    )
+            # Cost, tokens and model live on the child spans (rerank, generate); llmops sums the
+            # cost of every span in a trace, so the root only carries the rolled-up total in meta.
             root.meta.update(
                 refused=result.refused,
                 refusal_reason=result.refusal_reason,
                 n_citations=len(result.citations),
                 confidence=round(confidence, 4),
+                total_cost_usd=result.cost_usd,
+                input_tokens=result.input_tokens,
+                output_tokens=result.output_tokens,
+                model=result.model,
             )
             return result

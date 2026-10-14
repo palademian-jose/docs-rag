@@ -6,7 +6,7 @@ import pytest
 from llmops.pricing import estimate_cost
 
 from docs_rag.bootstrap import build_pipeline
-from docs_rag.cache import MemoryAnswerCache
+from docs_rag.cache import MemoryAnswerCache, SemanticAnswerCache
 from docs_rag.limits import DailyCostCap
 from docs_rag.llm import FakeLLMClient
 from docs_rag.pipeline import CostCapError, PipelineConfig, RAGPipeline
@@ -62,7 +62,11 @@ def test_spans_cover_every_stage_with_cost(corpus_index, tmp_path: Path, priced_
     rerank = next(s for s in spans if s["name"] == "rerank")
     assert rerank["cost_usd"] == pytest.approx(0.002)
     assert result.cost_usd == pytest.approx(expected_gen + 0.002)
-    assert root["cost_usd"] == pytest.approx(result.cost_usd)
+    # llmops sums cost over every span of a trace, so the root must not repeat its children's cost.
+    assert root["cost_usd"] == 0.0 and root["meta"]["total_cost_usd"] == pytest.approx(
+        result.cost_usd
+    )
+    assert sum(s["cost_usd"] for s in spans) == pytest.approx(result.cost_usd + embed["cost_usd"])
     assert spans[0]["kind"] == "cache" and spans[0]["cache_hit"] is False
 
 
@@ -78,6 +82,12 @@ def test_cache_hit_skips_model_and_costs_nothing(corpus_index, tmp_path: Path) -
     spans = read_spans(tmp_path / "spans.jsonl")
     assert [s["name"] for s in spans[-2:]] == ["cache.lookup", "rag.ask"]
     assert spans[-2]["cache_hit"] is True and spans[-1]["cache_hit"] is True
+    first_lookup = next(s for s in spans if s["name"] == "cache.lookup")
+    assert first_lookup["meta"]["cache_type"] == "exact" and first_lookup["cache_hit"] is False
+    assert spans[-2]["meta"]["cache_type"] == "exact"
+    assert spans[-2]["meta"]["saved_cost_usd"] == pytest.approx(first.cost_usd)
+    assert spans[-2]["meta"]["saved_ms"] > 0
+    assert second.cache_kind == "exact" and spans[-1]["meta"]["cache_kind"] == "exact"
 
 
 def test_cache_key_changes_with_configuration(corpus_index, tmp_path: Path) -> None:
@@ -130,3 +140,40 @@ def test_build_pipeline_wires_everything(settings) -> None:
     assert {s["feature"] for s in read_spans(settings.trace_path)} == {"rag.answer"}
     naive = build_pipeline(settings, index=pipeline.index, retrieval_mode="dense", reranker="none")
     assert naive.retriever.name == "dense" and naive.reranker is None
+
+
+def test_semantic_cache_serves_a_near_duplicate_and_scopes_by_fingerprint(
+    corpus_index, tmp_path: Path
+) -> None:
+    semantic = SemanticAnswerCache(threshold=0.8)
+    pipeline = _pipeline(corpus_index, tmp_path, cache=MemoryAnswerCache(), semantic_cache=semantic)
+    first = pipeline.ask(QUESTION)
+    # Not an exact match after normalisation (extra word), but a near-duplicate.
+    near = pipeline.ask("How long does the canary receive 5% of traffic exactly?")
+    assert not first.cache_hit and near.cache_hit and near.cache_kind == "semantic"
+    assert near.answer == first.answer and near.cost_usd == 0.0
+    assert len(pipeline.llm.calls) == 1
+    spans = read_spans(tmp_path / "spans.jsonl")
+    sem = [s for s in spans if s["name"] == "cache.semantic"]
+    assert [s["cache_hit"] for s in sem] == [False, True]
+    assert sem[1]["meta"]["similarity"] >= 0.8 and sem[1]["meta"]["saved_cost_usd"] >= 0
+    assert all(s["meta"]["cache_type"] == "semantic" for s in sem)
+    # unrelated question: both layers miss
+    other = pipeline.ask("What is the pull request size limit?")
+    assert not other.cache_hit and len(pipeline.llm.calls) == 2
+    # a different configuration (fingerprint) must not match the old entries
+    b = _pipeline(
+        corpus_index,
+        tmp_path,
+        cache=MemoryAnswerCache(),
+        semantic_cache=semantic,
+        config=PipelineConfig(top_k=3, candidates=50, refusal_threshold=0.15, cache_enabled=True),
+    )
+    assert not b.ask("How long does the canary receive 5% of traffic exactly?").cache_hit
+
+
+def test_build_pipeline_semantic_cache_follows_settings(settings) -> None:
+    assert build_pipeline(settings).semantic_cache is None
+    on = build_pipeline(settings, semantic_cache=True)
+    assert isinstance(on.semantic_cache, SemanticAnswerCache)
+    assert on.semantic_cache.threshold == settings.semantic_cache_threshold == 0.92
