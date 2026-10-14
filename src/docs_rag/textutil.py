@@ -64,6 +64,7 @@ def split_sentences(text: str) -> list[str]:
     units: list[str] = []
     paragraph: list[str] = []
     in_fence = False
+    last_was_item = False
 
     def flush() -> None:
         if paragraph:
@@ -76,11 +77,13 @@ def split_sentences(text: str) -> list[str]:
         if line.startswith("```"):
             in_fence = not in_fence
             flush()
+            last_was_item = False
             continue
         if in_fence:
             continue
         if not line or set(line) <= {"-", "|", ":", " "}:
             flush()
+            last_was_item = False
             continue
         if line.startswith(("- ", "* ", "|")) or re.match(r"^\d+\.\s", line):
             flush()
@@ -88,10 +91,17 @@ def split_sentences(text: str) -> list[str]:
             item = re.sub(r"^\d+\.\s+", "", item)
             if item:
                 units.append(item)
+                last_was_item = True
             continue
         if _HEADING_RE.match(line):
             flush()
+            last_was_item = False
             continue
+        if last_was_item and raw_line[:1] in (" ", "\t") and units:
+            # Indented continuation of a list item.
+            units[-1] = f"{units[-1]} {line}"
+            continue
+        last_was_item = False
         paragraph.append(line)
     flush()
     return units

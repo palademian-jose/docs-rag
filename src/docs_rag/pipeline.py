@@ -29,6 +29,7 @@ class PipelineConfig(BaseModel):
     refusal_threshold: float = 0.15
     max_tokens: int = 512
     model: str | None = None
+    cache_enabled: bool = False
 
     @classmethod
     def from_settings(cls, settings: Settings) -> PipelineConfig:
@@ -37,6 +38,7 @@ class PipelineConfig(BaseModel):
             candidates=settings.candidates_per_retriever,
             refusal_threshold=settings.refusal_threshold,
             model=settings.llm_model,
+            cache_enabled=settings.cache_enabled,
         )
 
 
@@ -115,9 +117,13 @@ class RAGPipeline:
             retrieved_ids=[c.chunk_id for c in candidates],
             context_ids=[c.chunk_id for c in context],
         )
-        if not context or confidence < self.config.refusal_threshold:
+        # The confidence gate only applies to reranker scores, which are calibrated to [0, 1].
+        # Raw retrieval scores (cosine, BM25, RRF) are not comparable across retrievers, so
+        # without a reranker the model's own NOT_IN_DOCS refusal is the only gate.
+        gated = self.reranker is not None and confidence < self.config.refusal_threshold
+        if not context or gated:
             result.refused = True
-            result.refusal_reason = "low_retrieval_confidence"
+            result.refusal_reason = "low_retrieval_confidence" if context else "no_context"
         else:
             response = self.generate(question, context)
             parsed = parse_answer(response.text, [c.chunk for c in context])

@@ -30,9 +30,23 @@ def test_dense_pipeline_refuses_off_corpus(corpus_index) -> None:
 
 
 def test_low_confidence_refuses_before_generation(corpus_index) -> None:
+    from docs_rag.rerank.fake import FakeReranker
+
+    llm = FakeLLMClient()
+    config = PipelineConfig(top_k=5, candidates=10, refusal_threshold=10.0)
+    pipeline = RAGPipeline(
+        corpus_index, llm, DenseRetriever(corpus_index), config, reranker=FakeReranker()
+    )
+    result = pipeline.ask("What is the pull request size limit?")
+    assert result.refused and result.refusal_reason == "low_retrieval_confidence"
+    assert llm.calls == [], "LLM must not be called when confidence is too low"
+
+
+def test_confidence_gate_ignored_without_reranker(corpus_index) -> None:
+    """Raw retrieval scores are not calibrated, so the threshold must not apply to them."""
     llm = FakeLLMClient()
     config = PipelineConfig(top_k=5, candidates=10, refusal_threshold=10.0)
     pipeline = RAGPipeline(corpus_index, llm, DenseRetriever(corpus_index), config)
     result = pipeline.ask("What is the pull request size limit?")
-    assert result.refused and result.refusal_reason == "low_retrieval_confidence"
-    assert llm.calls == [], "LLM must not be called when confidence is too low"
+    assert not result.refused
+    assert llm.calls, "LLM is the only gate when no reranker is configured"

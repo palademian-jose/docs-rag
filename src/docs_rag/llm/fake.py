@@ -140,7 +140,7 @@ class FakeLLMClient:
         chosen: list[_Candidate] = []
         seen: set[str] = set()
         for cand in candidates:
-            if cand.score < max(self.refusal_threshold, best.score * 0.6):
+            if cand.score < max(self.refusal_threshold, best.score * 0.8):
                 break
             if cand.sentence in seen:
                 continue

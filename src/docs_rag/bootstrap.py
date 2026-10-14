@@ -19,13 +19,19 @@ def build_pipeline(
     config: PipelineConfig | None = None,
     retrieval_mode: str | None = None,
     reranker: str | None = None,
+    cache_enabled: bool | None = None,
 ) -> RAGPipeline:
-    """Build a pipeline. ``retrieval_mode`` ("dense"/"hybrid") and ``reranker``
-    ("fake"/"cohere"/"local"/"none") override the settings for eval variants."""
+    """Build a pipeline.
+
+    ``retrieval_mode`` ("dense"/"hybrid"), ``reranker`` ("fake"/"cohere"/"local"/"none") and
+    ``cache_enabled`` override the settings so the eval script can build each variant.
+    """
     settings = settings or get_settings()
     index = index or load_or_build_index(settings)
     llm = llm or get_client(settings)
     config = config or PipelineConfig.from_settings(settings)
+    if cache_enabled is not None:
+        config = config.model_copy(update={"cache_enabled": cache_enabled})
     retriever = build_retriever(index, settings, mode=retrieval_mode)
     return RAGPipeline(
         index, llm, retriever, config, reranker=get_reranker(settings, kind=reranker)
