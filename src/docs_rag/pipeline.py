@@ -22,7 +22,7 @@ from docs_rag.llm.base import LLMClient, LLMResponse
 from docs_rag.rerank.base import Reranker
 from docs_rag.retrieval.types import RetrievedChunk
 from docs_rag.settings import Settings
-from docs_rag.tracing import FEATURE, Tracer, null_tracer, wrap_client
+from docs_rag.tracing import FEATURE, Tracer, null_tracer, response_cost, wrap_client
 
 
 class CostCapError(RuntimeError):
@@ -162,15 +162,7 @@ class RAGPipeline:
             messages, model=self.config.model, max_tokens=self.config.max_tokens
         )
         # Same rule the llm span used: the provider-reported cost wins over tokens x list price.
-        cost = response.cost_usd
-        if cost is None:
-            cost = (
-                estimate_cost(
-                    response.model, response.usage.input_tokens, response.usage.output_tokens
-                )
-                or 0.0
-            )
-        return response, cost
+        return response, response_cost(response)
 
     def _cache_lookup(self, question: str, key: str) -> tuple[dict | None, str | None]:
         """Exact lookup, then the semantic layer (if configured). Returns (payload, kind)."""
