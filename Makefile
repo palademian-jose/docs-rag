@@ -1,4 +1,4 @@
-.PHONY: setup test lint format demo serve ingest eval sweep gate calibrate build-eval-set docker clean
+.PHONY: setup test lint format demo serve ingest eval sweep gate calibrate build-eval-set traces docker clean
 
 UV ?= uv
 PORT ?= 8000
@@ -42,6 +42,10 @@ gate:             ## regression gate against reports/baseline.json (evalkit gate
 
 calibrate:        ## judge calibration against evals/human_labels.jsonl
 	$(UV) run python scripts/calibrate_judge.py
+
+traces:           ## replay the golden set in 4 serving configs -> traces/scenarios/, then the before/after table
+	$(UV) run python scripts/trace_scenarios.py
+	$(UV) run llmops before-after --dirs "traces/scenarios/*" --md reports/before_after.md --title "docs-rag serving scenarios (fake provider, projected cost)"
 
 docker:           ## build the container image
 	docker build --build-context llm-evalops=../llm-evalops -t docs-rag:latest .
