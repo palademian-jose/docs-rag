@@ -44,8 +44,10 @@ class Settings(BaseSettings):
 
     # Retrieval
     corpus_path: Path = Path("data/corpus")
-    chunk_size: int = Field(default=512, ge=32)
-    chunk_overlap: int = Field(default=64, ge=0)
+    # Sizes are word tokens (roughly 0.75 LLM tokens). Handbook pages are ~350 words, so 128
+    # gives about three section-aligned chunks per page.
+    chunk_size: int = Field(default=128, ge=32)
+    chunk_overlap: int = Field(default=16, ge=0)
     retrieval_mode: RetrievalMode = "hybrid"
     candidates_per_retriever: int = 50
     rrf_k: int = 60
