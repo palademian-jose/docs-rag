@@ -12,6 +12,7 @@ from docs_rag.generation.answer import REFUSAL_MESSAGE, Citation, parse_answer
 from docs_rag.generation.prompt import ContextChunk, build_messages
 from docs_rag.ingest.index import Index
 from docs_rag.llm.base import LLMClient
+from docs_rag.rerank.base import Reranker
 from docs_rag.retrieval.types import RetrievedChunk
 from docs_rag.settings import Settings
 
@@ -63,10 +64,13 @@ class RAGPipeline:
         llm: LLMClient,
         retriever: Retriever,
         config: PipelineConfig | None = None,
+        *,
+        reranker: Reranker | None = None,
     ) -> None:
         self.index = index
         self.llm = llm
         self.retriever = retriever
+        self.reranker = reranker
         self.config = config or PipelineConfig()
 
     # -- stages -------------------------------------------------------------------------------
@@ -76,7 +80,10 @@ class RAGPipeline:
     def select_context(
         self, question: str, candidates: list[RetrievedChunk]
     ) -> list[RetrievedChunk]:
-        return candidates[: self.config.top_k]
+        """Two-stage retrieval: recall ``candidates`` then rerank down to ``top_k``."""
+        if self.reranker is None:
+            return candidates[: self.config.top_k]
+        return self.reranker.rerank(question, candidates, self.config.top_k)
 
     def generate(self, question: str, context: list[RetrievedChunk]):
         ctx = [
