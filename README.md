@@ -250,7 +250,7 @@ when any metric breaches its absolute `min`/`max` or moves more than `max_drop`/
 against the baseline. `evals.yaml` keeps its thresholds; evalkit's config names the
 lower-is-better delta `max_increase` where the pre-integration script said `max_rise`, and
 rejects unknown keys. The committed `reports/baseline.json` loads as an evalkit `EvalResult`
-unchanged. CI runs lint, tests, a 40-case eval and the gate (appending the table to the job
+unchanged. CI runs lint, tests, the full-golden-set eval and the gate (appending the table to the job
 summary), and uploads `reports/`.
 
 ## Observability and cost controls
