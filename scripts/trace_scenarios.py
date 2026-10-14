@@ -4,21 +4,24 @@ directory, so `llmops before-after` can build a real before/after table from the
     uv run python scripts/trace_scenarios.py       # -> traces/scenarios/<scenario>/spans.jsonl
     uv run llmops before-after --dirs "traces/scenarios/*" --md reports/before_after.md
 
-Scenarios (cumulative, like llm-evalops' synthetic ladder):
+Every scenario serves the SAME request stream, so the rows are comparable (the stream is three
+passes over the golden questions: the questions, the same questions again, and lightly reworded
+versions of them). The configurations are cumulative, like llm-evalops' synthetic ladder:
 
-  baseline        no answer cache; the golden questions once
-  exact_cache     exact answer cache; the questions twice, so the second pass hits
+  baseline        no answer cache; every request runs the full pipeline
+  exact_cache     exact answer cache; the second pass hits (the set is run twice so hits occur)
   semantic_cache  exact + semantic cache (llmops.cache.SemanticCache, fake embedding backend); the
-                  questions, then lightly reworded versions of them (some are near-duplicates the
-                  semantic layer catches, some are not)
+                  reworded pass is caught when the rewording stays above the threshold (some
+                  rewordings do, some do not)
   cheaper_model   semantic_cache with LLM_MODEL switched to CHEAP_MODEL (claude-haiku-4.5)
 
 The provider is the deterministic FAKE one: it has no real latency and no real bill. To get a
 cost column anyway, the fake client reports the model it is "billed as" (LLM_MODEL, or CHEAP_MODEL
 for cheaper_model) and the fake reranker is billed as Cohere `rerank-v3.5`; llmops prices the
 observed token counts at those models' list prices (llmops/pricing.json). Treat the cost column as
-PROJECTED, and the latency columns as pipeline compute only. Cache hit rates come from the replay
-design above, not from real traffic.
+PROJECTED, and the latency columns as pipeline compute only (with a zero-latency fake LLM, cache
+lookups can only ADD time to a miss; against a real model a hit saves seconds). Cache hit rates
+come from the replay design above, not from real traffic.
 """
 
 from __future__ import annotations
@@ -65,17 +68,25 @@ def reword(question: str, i: int) -> str:
     return "Can you tell me " + q[:1].lower() + q[1:]
 
 
-def _passes(name: str, questions: list[str]) -> list[list[str]]:
-    if name == "baseline":
-        return [questions]
-    if name == "exact_cache":
-        return [questions, questions]
-    return [questions, [reword(q, i) for i, q in enumerate(questions)]]
+def request_stream(questions: list[str]) -> list[str]:
+    """The stream every scenario serves: originals, verbatim repeats, then rewordings."""
+    return [*questions, *questions, *(reword(q, i) for i, q in enumerate(questions))]
 
 
 def run_scenario(
-    name: str, questions: list[str], settings: Settings, index: Any, out_dir: Path, threshold: float
-) -> dict[str, Any]:
+    name: str,
+    stream: list[str],
+    settings: Settings,
+    index: Any,
+    out_dir: Path,
+    threshold: float,
+    reference: list[str] | None = None,
+) -> tuple[dict[str, Any], list[str]]:
+    """Run one scenario; returns (stats, the answer text per request).
+
+    ``reference`` is the baseline's answers: ``answers_differing`` counts requests whose answer
+    differs from what the full pipeline gave for the same question (a false cache hit).
+    """
     model = settings.cheap_model if name == "cheaper_model" else settings.llm_model
     settings = settings.model_copy(update={"llm_model": model, "cache_enabled": name != "baseline"})
     spans_path = out_dir / name / "spans.jsonl"
@@ -99,16 +110,13 @@ def run_scenario(
     )
     if pipeline.reranker is not None:
         pipeline.reranker = _BilledReranker()
-    results = [
-        pipeline.ask(q, user_id=f"u{i % 20:02d}")
-        for p in _passes(name, questions)
-        for i, q in enumerate(p)
-    ]
+    results = [pipeline.ask(q, user_id=f"u{i % 20:02d}") for i, q in enumerate(stream)]
     tracer.sink.close()  # type: ignore[attr-defined]
 
     spans = read_spans(spans_path)
     sem_hits = [s for s in spans if s["name"] == "cache.semantic" and s["cache_hit"]]
-    return {
+    answers = [r.answer for r in results]
+    stats = {
         "scenario": name,
         "model": model,
         "requests": len(results),
@@ -118,8 +126,12 @@ def run_scenario(
         "refused": sum(1 for r in results if r.refused),
         "cost_usd": round(sum(s["cost_usd"] for s in spans), 6),
         "min_semantic_similarity": min((s["meta"]["similarity"] for s in sem_hits), default=None),
+        "answers_differing": (
+            sum(a != b for a, b in zip(answers, reference, strict=True)) if reference else 0
+        ),
         "spans": len(spans),
     }
+    return stats, answers
 
 
 def main(argv: list[str] | None = None) -> dict[str, dict[str, Any]]:
@@ -143,15 +155,21 @@ def main(argv: list[str] | None = None) -> dict[str, dict[str, Any]]:
         raise SystemExit("no golden questions found")
     threshold = args.threshold if args.threshold is not None else settings.semantic_cache_threshold
     index = load_or_build_index(settings)
+    stream = request_stream(questions)
 
     stats: dict[str, dict[str, Any]] = {}
+    reference: list[str] | None = None
     for name in SCENARIOS:
-        stats[name] = run_scenario(name, questions, settings, index, args.out, threshold)
+        stats[name], answers = run_scenario(
+            name, stream, settings, index, args.out, threshold, reference
+        )
+        reference = reference or answers
         s = stats[name]
         print(
             f"{name:15s} model={s['model']:28s} requests={s['requests']:4d} "
             f"exact_hits={s['exact_hits']:4d} semantic_hits={s['semantic_hits']:4d} "
-            f"llm_calls={s['llm_calls']:4d} projected_cost=${s['cost_usd']:.4f}"
+            f"llm_calls={s['llm_calls']:4d} projected_cost=${s['cost_usd']:.4f} "
+            f"answers_differing={s['answers_differing']}"
         )
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "summary.json").write_text(json.dumps(stats, indent=2), encoding="utf-8")

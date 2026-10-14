@@ -37,16 +37,22 @@ def test_each_scenario_writes_its_own_span_directory(scenarios) -> None:
 def test_baseline_has_no_cache_and_exact_cache_hits_on_the_second_pass(scenarios) -> None:
     _, out, stats = scenarios
     assert not [s for s in read_spans(out / "baseline" / "spans.jsonl") if s["kind"] == "cache"]
-    assert stats["baseline"]["requests"] == 24
-    exact = stats["exact_cache"]
-    assert exact["requests"] == 48 and exact["exact_hits"] == 24 and exact["semantic_hits"] == 0
-    assert exact["cost_usd"] == pytest.approx(stats["baseline"]["cost_usd"])
+    # every scenario serves the same stream: originals, verbatim repeats, rewordings
+    assert {s["requests"] for s in stats.values()} == {72}
+    base, exact = stats["baseline"], stats["exact_cache"]
+    assert base["exact_hits"] == base["semantic_hits"] == 0
+    assert exact["exact_hits"] >= 24 and exact["semantic_hits"] == 0
+    assert exact["llm_calls"] < base["llm_calls"] and exact["cost_usd"] < base["cost_usd"]
+    assert exact["answers_differing"] == 0, "an exact hit is the answer the pipeline gave"
 
 
 def test_semantic_scenario_catches_rewordings_the_exact_cache_misses(scenarios) -> None:
     _, out, stats = scenarios
-    sem = stats["semantic_cache"]
+    sem, exact = stats["semantic_cache"], stats["exact_cache"]
     assert sem["semantic_hits"] > 0 and sem["min_semantic_similarity"] >= 0.92
+    assert sem["exact_hits"] == exact["exact_hits"]
+    assert sem["llm_calls"] < exact["llm_calls"] and sem["cost_usd"] < exact["cost_usd"]
+    assert 0 <= sem["answers_differing"] <= sem["semantic_hits"], "audit of semantic false hits"
     spans = read_spans(out / "semantic_cache" / "spans.jsonl")
     assert any(s["name"] == "cache.semantic" and s["cache_hit"] for s in spans)
 
@@ -54,6 +60,7 @@ def test_semantic_scenario_catches_rewordings_the_exact_cache_misses(scenarios) 
 def test_projected_cost_drops_with_the_cheaper_model(scenarios) -> None:
     _, out, stats = scenarios
     assert stats["baseline"]["cost_usd"] > 0, "fake spans are priced as the model they report"
+    assert stats["baseline"]["cost_usd"] > stats["semantic_cache"]["cost_usd"]
     sem, cheap = stats["semantic_cache"], stats["cheaper_model"]
     assert cheap["model"] == "anthropic/claude-haiku-4.5"
     assert cheap["requests"] == sem["requests"] and cheap["llm_calls"] == sem["llm_calls"]
