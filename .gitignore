@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv
+
+# Secrets and local config
+.env
+
+# Runtime artifacts
+traces/
+data/index/
+*.npz
+
+# Generated reports (keep the committed baseline)
+reports/*.json
+!reports/baseline.json

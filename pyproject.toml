@@ -1,0 +1,53 @@
+[project]
+name = "docs-rag"
+version = "0.1.0"
+description = "Production-style RAG over a documentation corpus: hybrid retrieval, reranking, cited answers, refusal, evals, tracing and cost controls."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "Deimos" }]
+dependencies = [
+    "anthropic>=1.14.0",
+    "fastapi>=0.143.1",
+    "httpx>=0.28.1",
+    "numpy>=2.5.4",
+    "openai>=3.31.0",
+    "pydantic>=2.14.1",
+    "pydantic-settings>=2.16.0",
+    "python-multipart>=0.0.32",
+    "pyyaml>=6.0.3",
+    "rank-bm25>=0.2.2",
+    "uvicorn[standard]>=0.54.0",
+]
+
+[project.optional-dependencies]
+local = ["sentence-transformers>=6.1.0"]
+pg = ["pgvector>=0.5.1", "psycopg[binary]>=3.3.6"]
+redis = ["redis>=8.1.0"]
+
+[project.scripts]
+docs-rag = "docs_rag.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = ["pytest>=9.1.1", "pytest-cov>=7.1.0", "ruff>=0.17.0"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "W", "N", "SIM", "RUF"]
+ignore = ["RUF012"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
