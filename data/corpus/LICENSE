@@ -1,0 +1,13 @@
+Corpus license
+==============
+
+Every file under data/corpus/ is an original, synthetic "internal engineering
+handbook" for a fictional company (Larkspur Systems). It was written for this
+repository so that the sample corpus has no third-party licensing questions.
+
+The handbook, like the rest of this repository, is released under the MIT
+License (see the repository root LICENSE). Any resemblance to a real company,
+product, person or policy is coincidental.
+
+To run docs-rag over your own notes, set CORPUS_PATH to a folder of Markdown
+or plain-text files.
