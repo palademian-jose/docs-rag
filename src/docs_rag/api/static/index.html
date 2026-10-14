@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>docs-rag</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --ink:#1f2937; --muted:#6b7280; --accent:#2563eb; --warn:#b45309; --warnbg:#fffbeb; --border:#e5e7eb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; background:var(--bg); color:var(--ink); }
+  main { max-width: 760px; margin: 0 auto; padding: 32px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  p.sub { color: var(--muted); margin: 0 0 20px; font-size: 14px; }
+  form { display:flex; gap:8px; }
+  input[type=text] { flex:1; padding:12px 14px; font-size:16px; border:1px solid var(--border); border-radius:8px; background:var(--card); }
+  button { padding:12px 18px; font-size:15px; border:0; border-radius:8px; background:var(--accent); color:#fff; cursor:pointer; }
+  button:disabled { opacity:.6; cursor:wait; }
+  .examples { margin:12px 0 0; display:flex; flex-wrap:wrap; gap:6px; }
+  .examples button { background:#fff; color:var(--ink); border:1px solid var(--border); padding:6px 10px; font-size:13px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:18px 20px; margin-top:20px; }
+  .card.refused { background:var(--warnbg); border-color:#fcd34d; }
+  .badge { display:inline-block; font-size:12px; padding:2px 8px; border-radius:999px; background:#dbeafe; color:#1e40af; margin-right:6px; }
+  .card.refused .badge { background:#fde68a; color:var(--warn); }
+  .answer { font-size:16px; line-height:1.55; margin:10px 0 14px; white-space:pre-wrap; }
+  .answer a.cite { color:var(--accent); text-decoration:none; font-size:12px; vertical-align:super; }
+  ol.cites { margin:0; padding-left:20px; }
+  ol.cites li { margin:6px 0; font-size:14px; }
+  ol.cites a { color:var(--accent); text-decoration:none; font-family: ui-monospace, Menlo, monospace; }
+  ol.cites .snip { color:var(--muted); display:block; font-size:13px; }
+  .meta { color:var(--muted); font-size:12px; margin-top:12px; }
+  .error { color:#b91c1c; }
+</style>
+</head>
+<body>
+<main>
+  <h1>docs-rag</h1>
+  <p class="sub">Ask a question about the Larkspur engineering handbook. Every answer is cited; if the docs do not cover it, the system says so.</p>
+  <form id="f">
+    <input id="q" type="text" placeholder="e.g. How long does a canary receive traffic?" autocomplete="off" required>
+    <button id="go" type="submit">Ask</button>
+  </form>
+  <div class="examples" id="ex"></div>
+  <div id="out"></div>
+</main>
+<script>
+const EXAMPLES = [
+  "How long does the canary receive traffic before promotion?",
+  "What is the pull request size limit?",
+  "Who approves break-glass access?",
+  "How many replicas do production services run?",
+  "What is the capital of France?"
+];
+const ex = document.getElementById('ex');
+for (const e of EXAMPLES) {
+  const b = document.createElement('button'); b.type = 'button'; b.textContent = e;
+  b.onclick = () => { document.getElementById('q').value = e; ask(e); };
+  ex.appendChild(b);
+}
+document.getElementById('f').onsubmit = (ev) => { ev.preventDefault(); ask(document.getElementById('q').value); };
+
+function esc(s) { return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function docUrl(c) { return `/docs/${c.doc_path}?start=${c.start_line}&end=${c.end_line}#L${c.start_line}`; }
+
+async function ask(question) {
+  const out = document.getElementById('out'); const go = document.getElementById('go');
+  go.disabled = true; out.innerHTML = '<div class="card">Thinking…</div>';
+  try {
+    const r = await fetch('/ask', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({question}) });
+    const data = await r.json();
+    if (!r.ok) { out.innerHTML = `<div class="card error">Error ${r.status}: ${esc(data.detail || '')}</div>`; return; }
+    render(data);
+  } catch (e) { out.innerHTML = `<div class="card error">${esc(String(e))}</div>`; }
+  finally { go.disabled = false; }
+}
+
+function render(d) {
+  const byId = {}; d.citations.forEach((c, i) => byId[c.chunk_id] = i + 1);
+  let answer = esc(d.answer).replace(/\[([0-9a-f]{6,40})\]/g, (m, id) =>
+    byId[id] ? `<a class="cite" href="${docUrl(d.citations[byId[id]-1])}" target="_blank">[${byId[id]}]</a>` : '');
+  const cites = d.citations.map((c, i) =>
+    `<li><a href="${docUrl(c)}" target="_blank">[${i+1}] ${esc(c.doc_path)}#L${c.start_line}-L${c.end_line}</a><span class="snip">${esc(c.snippet)}</span></li>`).join('');
+  const badge = d.refused ? 'Not in the docs' : `${d.citations.length} citation${d.citations.length === 1 ? '' : 's'}`;
+  document.getElementById('out').innerHTML = `
+    <div class="card ${d.refused ? 'refused' : ''}">
+      <span class="badge">${badge}</span>${d.cache_hit ? '<span class="badge">cache hit</span>' : ''}
+      <div class="answer">${answer}</div>
+      ${d.citations.length ? `<ol class="cites">${cites}</ol>` : ''}
+      <div class="meta">trace ${esc(d.trace_id)} · ${d.latency_ms} ms · $${Number(d.cost_usd).toFixed(6)} · confidence ${d.confidence}${d.refusal_reason ? ' · ' + esc(d.refusal_reason) : ''}</div>
+    </div>`;
+}
+</script>
+</body>
+</html>
