@@ -10,6 +10,7 @@ dependencies = [
     "anthropic>=1.14.0",
     "fastapi>=0.143.1",
     "httpx>=0.28.1",
+    "llm-evalops",
     "numpy>=2.5.4",
     "openai>=3.31.0",
     "pydantic>=2.14.1",
@@ -51,3 +52,6 @@ ignore = ["RUF012"]
 testpaths = ["tests"]
 addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
+
+[tool.uv.sources]
+llm-evalops = { path = "../llm-evalops", editable = true }

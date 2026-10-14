@@ -10,14 +10,30 @@ env:
   EMBEDDING_PROVIDER: fake
   VECTOR_STORE: memory
 
+# `llm-evalops` is a path dependency (`../llm-evalops`, see [tool.uv.sources] in pyproject.toml).
+# actions/checkout cannot write outside $GITHUB_WORKSPACE, so both repos are checked out side by
+# side inside it (docs-rag/ and llm-evalops/) and every step runs from docs-rag/. The sibling
+# repo must be public; if it is private, add a read-only token as the EVALOPS_TOKEN secret.
+defaults:
+  run:
+    working-directory: docs-rag
+
 jobs:
   lint-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: docs-rag
+      - uses: actions/checkout@v4
+        with:
+          repository: palademian-jose/llm-evalops
+          path: llm-evalops
+          token: ${{ secrets.EVALOPS_TOKEN || github.token }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: docs-rag/uv.lock
       - run: uv python install 3.12
       - run: uv sync --frozen
       - name: Lint
@@ -32,25 +48,31 @@ jobs:
     needs: lint-test
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: docs-rag
+      - uses: actions/checkout@v4
+        with:
+          repository: palademian-jose/llm-evalops
+          path: llm-evalops
+          token: ${{ secrets.EVALOPS_TOKEN || github.token }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          cache-dependency-glob: docs-rag/uv.lock
       - run: uv python install 3.12
       - run: uv sync --frozen
       - name: Evaluate (fake provider, subset)
         run: uv run python scripts/eval.py --mode all --limit 40 --out reports
       - name: Regression gate
         run: |
-          uv run python scripts/gate.py \
+          uv run evalkit gate \
             --baseline reports/baseline.json \
             --candidate reports/eval-latest.json \
             --config evals.yaml \
-            --out reports/gate.md
-      - name: Gate summary
-        if: always()
-        run: cat reports/gate.md >> "$GITHUB_STEP_SUMMARY" || true
+            --md reports/gate.md \
+            --annotate
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: reports
-          path: reports/
+          path: docs-rag/reports/

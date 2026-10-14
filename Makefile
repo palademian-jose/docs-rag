@@ -44,7 +44,7 @@ calibrate:        ## judge calibration against evals/human_labels.jsonl
 	$(UV) run python scripts/calibrate_judge.py
 
 docker:           ## build the container image
-	docker build -t docs-rag:latest .
+	docker build --build-context llm-evalops=../llm-evalops -t docs-rag:latest .
 
 clean:
 	rm -rf .pytest_cache .ruff_cache data/index traces/*.jsonl

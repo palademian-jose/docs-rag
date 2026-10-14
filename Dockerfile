@@ -1,3 +1,6 @@
+# `llm-evalops` is a path dependency (../llm-evalops) and lives outside this build context, so
+# pass it as a named context:
+#   docker build --build-context llm-evalops=../llm-evalops -t docs-rag:latest .
 # ---- build stage: resolve and install dependencies with uv -------------------------------
 FROM python:3.12-slim AS builder
 
@@ -9,15 +12,21 @@ ENV UV_COMPILE_BYTECODE=1 \
 
 WORKDIR /app
 
+# `../llm-evalops` relative to /app is /llm-evalops.
+COPY --from=llm-evalops pyproject.toml README.md /llm-evalops/
+COPY --from=llm-evalops src /llm-evalops/src
+
 # Install third-party dependencies first so this layer is cached across source changes.
+# --no-editable installs llm-evalops into the virtualenv, so the runtime stage does not need
+# its sources.
 COPY pyproject.toml uv.lock .python-version ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-install-project --no-dev
+    uv sync --frozen --no-install-project --no-dev --no-editable
 
 COPY src ./src
 COPY README.md ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev
+    uv sync --frozen --no-dev --no-editable
 
 # ---- runtime stage: slim image with only the virtualenv and runtime files --------------
 FROM python:3.12-slim AS runtime

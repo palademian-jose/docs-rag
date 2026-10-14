@@ -395,6 +395,33 @@ higher indexing cost when the questions are multi-hop or aggregate, the corpus i
 the entity set is stable. For a handbook where questions are local and the corpus changes
 weekly, it is the wrong trade.
 
+## Depending on llm-evalops
+
+Tracing, pricing and the regression gate come from the sibling project `llm-evalops`
+(`llmops` and `evalkit` packages). For local development it is a path dependency with an
+editable install; `pyproject.toml` carries
+
+```toml
+[tool.uv.sources]
+llm-evalops = { path = "../llm-evalops", editable = true }
+```
+
+so clone the two repos side by side and run `uv sync`. To switch to a git dependency once the
+repos are on GitHub (placeholder URL, replace the owner if it differs):
+
+```bash
+uv add "llm-evalops @ git+https://github.com/palademian-jose/llm-evalops"
+# and delete the path entry from [tool.uv.sources]
+```
+
+CI checks the sibling repo out next to this one (`actions/checkout` with
+`repository: palademian-jose/llm-evalops`; `checkout` cannot write outside the workspace, so both
+repos live under it as `docs-rag/` and `llm-evalops/` and `../llm-evalops` resolves). The sibling
+must be public; if it is private, create a read-only token and store it as the `EVALOPS_TOKEN`
+secret, which the workflow already prefers over the default token. The Docker image takes the
+sibling as a named build context:
+`docker build --build-context llm-evalops=../llm-evalops -t docs-rag .` (`make docker`).
+
 ## Known limitations
 
 - The fake provider proves the plumbing, not quality. Faithfulness is trivially 1.0 with an
