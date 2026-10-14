@@ -5,7 +5,7 @@ description = "Production-style RAG over a documentation corpus: hybrid retrieva
 readme = "README.md"
 requires-python = ">=3.12"
 license = { text = "MIT" }
-authors = [{ name = "Deimos" }]
+authors = [{ name = "palademian-jose" }]
 dependencies = [
     "anthropic>=1.14.0",
     "fastapi>=0.143.1",

@@ -9,7 +9,7 @@ from typing import Literal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-LLMProvider = Literal["fake", "anthropic", "openai"]
+LLMProvider = Literal["fake", "openrouter", "anthropic", "openai"]
 EmbeddingProvider = Literal["fake", "openai", "local"]
 VectorStoreKind = Literal["memory", "pgvector"]
 RetrievalMode = Literal["dense", "hybrid"]
@@ -19,11 +19,15 @@ RerankerKind = Literal["fake", "cohere", "local", "none"]
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # Providers
-    llm_provider: LLMProvider = "fake"
-    llm_model: str = "claude-sonnet-4-5"
-    judge_model: str = "gpt-4o"
-    cheap_model: str = "claude-haiku-4-5"
+    # Providers. ``llm_provider`` left unset means "auto": openrouter > anthropic > openai > fake.
+    llm_provider: LLMProvider | None = None
+    llm_model: str = "anthropic/claude-sonnet-4.5"
+    judge_model: str = "openai/gpt-4.1-mini"
+    cheap_model: str = "anthropic/claude-haiku-4.5"
+    openrouter_api_key: str | None = None
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_site_url: str | None = None
+    openrouter_app_name: str = "docs-rag"
     anthropic_api_key: str | None = None
     openai_api_key: str | None = None
     cohere_api_key: str | None = None
@@ -63,10 +67,20 @@ class Settings(BaseSettings):
 
     def has_key(self, provider: str) -> bool:
         return {
+            "openrouter": bool(self.openrouter_api_key),
             "anthropic": bool(self.anthropic_api_key),
             "openai": bool(self.openai_api_key),
             "cohere": bool(self.cohere_api_key),
         }.get(provider, False)
+
+    def resolved_llm_provider(self) -> LLMProvider:
+        """Explicit LLM_PROVIDER wins; otherwise pick the first backend that has a key."""
+        if self.llm_provider is not None:
+            return self.llm_provider
+        for candidate in ("openrouter", "anthropic", "openai"):
+            if self.has_key(candidate):
+                return candidate  # type: ignore[return-value]
+        return "fake"
 
 
 @lru_cache
