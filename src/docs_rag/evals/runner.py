@@ -19,6 +19,7 @@ from docs_rag.evals.metrics import (
     recall_at_k,
 )
 from docs_rag.pipeline import RAGPipeline
+from docs_rag.pricing import PriceBook
 
 K_VALUES = (5, 20, 50)
 
@@ -134,9 +135,22 @@ def run_eval(
     model: str,
     config: dict[str, Any] | None = None,
     k_values: tuple[int, ...] = K_VALUES,
+    pricing: PriceBook | None = None,
+    price_model: str | None = None,
 ) -> dict[str, Any]:
     scored = [score_case(pipeline, case, judge, k_values=k_values) for case in cases]
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S")
+    metrics = aggregate(scored)
+    by_source = {
+        source: aggregate([c for c in scored if c["source"] == source])
+        for source in sorted({c["source"] for c in scored})
+    }
+    if pricing is not None and price_model:
+        metrics["projected_cost_per_1k_usd"] = project_cost(scored, pricing, price_model)
+        for source, group in by_source.items():
+            group["projected_cost_per_1k_usd"] = project_cost(
+                [c for c in scored if c["source"] == source], pricing, price_model
+            )
     return {
         "run_id": f"{run_name}-{stamp}-{uuid.uuid4().hex[:6]}",
         "run_name": run_name,
@@ -147,10 +161,16 @@ def run_eval(
         "judge": judge.name,
         "n_cases": len(scored),
         "config": config or {},
-        "metrics": aggregate(scored),
-        "metrics_by_source": {
-            source: aggregate([c for c in scored if c["source"] == source])
-            for source in sorted({c["source"] for c in scored})
-        },
+        "price_model": price_model,
+        "metrics": metrics,
+        "metrics_by_source": by_source,
         "cases": scored,
     }
+
+
+def project_cost(cases: list[dict[str, Any]], pricing: PriceBook, model: str) -> float:
+    """USD per 1k queries if the observed token counts were billed at ``model`` list price."""
+    if not cases:
+        return 0.0
+    total = sum(pricing.token_cost(model, c["input_tokens"], c["output_tokens"]) for c in cases)
+    return round(total / len(cases) * 1000, 4)

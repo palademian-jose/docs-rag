@@ -21,6 +21,7 @@ from docs_rag.evals.golden import load_golden, resolve_answer_lines
 from docs_rag.evals.judge import get_judge
 from docs_rag.evals.runner import run_eval
 from docs_rag.ingest.index import load_or_build_index
+from docs_rag.pricing import load_pricing
 from docs_rag.settings import Settings, get_settings
 
 VARIANTS: dict[str, dict] = {
@@ -110,6 +111,7 @@ def main() -> None:
 
     index = load_or_build_index(settings)
     judge = get_judge(settings)
+    pricing = load_pricing(str(settings.pricing_path))
     args.out.mkdir(parents=True, exist_ok=True)
     modes = list(VARIANTS) if args.mode == "all" else [args.mode]
     results: dict[str, dict] = {}
@@ -127,6 +129,8 @@ def main() -> None:
             cases,
             judge,
             run_name=mode,
+            pricing=pricing,
+            price_model=settings.llm_model,
             provider=settings.resolved_llm_provider(),
             model=settings.llm_model
             if settings.resolved_llm_provider() != "fake"
@@ -144,7 +148,7 @@ def main() -> None:
         )
         results[mode] = res
         path = args.out / f"eval-{res['run_id']}.json"
-        path.write_text(json.dumps(res, indent=2), encoding="utf-8")
+        path.write_text(json.dumps(res, indent=2), encoding="utf-8", newline="\n")
         shutil.copyfile(path, args.out / f"eval-{mode}.json")
         m = res["metrics"]
         print(
@@ -157,7 +161,7 @@ def main() -> None:
     shutil.copyfile(args.out / f"eval-{final_name}.json", args.out / "eval-latest.json")
     if args.mode == "all":
         table = results_table(results, settings)
-        (args.out / "results.md").write_text(table, encoding="utf-8")
+        (args.out / "results.md").write_text(table, encoding="utf-8", newline="\n")
         print("\n" + table)
 
 

@@ -143,7 +143,7 @@ def main() -> None:
             "a real model. Re-run with a real key for numbers that can drive the choice.",
         ]
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    args.out.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     print(f"\nwrote {args.out}")
 
 

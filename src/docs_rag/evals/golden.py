@@ -52,7 +52,7 @@ def load_golden(paths: list[Path] | Path) -> list[GoldenCase]:
 def save_golden(path: Path, cases: list[GoldenCase]) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as fh:
+    with path.open("w", encoding="utf-8", newline="\n") as fh:
         for case in cases:
             fh.write(json.dumps(case.model_dump(exclude_none=True), ensure_ascii=False) + "\n")
 

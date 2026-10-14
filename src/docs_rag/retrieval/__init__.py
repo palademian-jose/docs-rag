@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from docs_rag.ingest.index import Index
+from docs_rag.pricing import PriceBook
 from docs_rag.retrieval.bm25 import BM25Retriever
 from docs_rag.retrieval.dense import DenseRetriever
 from docs_rag.retrieval.fusion import rrf
 from docs_rag.retrieval.hybrid import HybridRetriever
 from docs_rag.retrieval.types import RetrievedChunk
 from docs_rag.settings import Settings
+from docs_rag.tracing import Tracer
 
 
 def build_retriever(
@@ -16,9 +18,11 @@ def build_retriever(
     settings: Settings,
     *,
     mode: str | None = None,
+    tracer: Tracer | None = None,
+    pricing: PriceBook | None = None,
 ) -> DenseRetriever | HybridRetriever:
     mode = mode or settings.retrieval_mode
-    dense = DenseRetriever(index)
+    dense = DenseRetriever(index, tracer=tracer, pricing=pricing)
     if mode == "dense":
         return dense
     return HybridRetriever(

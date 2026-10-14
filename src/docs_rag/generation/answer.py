@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 
 from docs_rag.generation.prompt import REFUSAL_TOKEN
 from docs_rag.ingest.chunking import Chunk
+from docs_rag.textutil import is_heading
 
 CITATION_RE = re.compile(r"\[([0-9a-f]{6,40})\]")
 _REFUSAL_PHRASES = (
@@ -52,7 +53,11 @@ def looks_like_refusal(text: str) -> bool:
 
 
 def make_snippet(chunk: Chunk, max_chars: int = 200) -> str:
-    text = " ".join(chunk.text.split())
+    """Short preview of the chunk, starting at its section heading when it contains one."""
+    lines = chunk.text.splitlines()
+    heading_idx = next((i for i, line in enumerate(lines) if is_heading(line)), None)
+    body = lines[heading_idx:] if heading_idx is not None else lines
+    text = " ".join(" ".join(body).split())
     return text if len(text) <= max_chars else text[: max_chars - 1].rstrip() + "…"
 
 

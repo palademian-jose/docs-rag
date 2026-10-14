@@ -1,10 +1,15 @@
-"""FastAPI application: POST /ask, GET /health, GET /docs/{path} and the single-page UI."""
+"""FastAPI application: POST /ask, GET /health, GET /docs/{path} and the single-page UI.
+
+Every request to /ask passes a per-IP token bucket and the daily USD cost cap before any model
+call is made; both return HTTP 429 with a Retry-After header.
+"""
 
 from __future__ import annotations
 
 import html
 import logging
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +19,8 @@ from pydantic import BaseModel, Field
 
 from docs_rag import __version__
 from docs_rag.generation.answer import Citation
-from docs_rag.pipeline import RAGPipeline
+from docs_rag.limits import RateLimiter
+from docs_rag.pipeline import CostCapError, RAGPipeline
 from docs_rag.settings import Settings, get_settings
 
 log = logging.getLogger(__name__)
@@ -35,6 +41,13 @@ class AskResponse(BaseModel):
     cost_usd: float
     cache_hit: bool = False
     confidence: float = 0.0
+
+
+def client_ip(request: Request) -> str:
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def _resolve_doc(corpus_root: Path, rel_path: str) -> Path:
@@ -79,18 +92,9 @@ def create_app(
     pipeline: RAGPipeline | None = None,
     *,
     pipeline_factory: Callable[[Settings], RAGPipeline] | None = None,
+    rate_limiter: RateLimiter | None = None,
 ) -> FastAPI:
     settings = settings or get_settings()
-    app = FastAPI(
-        title="docs-rag",
-        version=__version__,
-        docs_url="/api-docs",
-        redoc_url=None,
-        openapi_url="/openapi.json",
-    )
-    app.state.settings = settings
-    app.state.pipeline = pipeline
-    app.state.pipeline_factory = pipeline_factory
 
     def get_pipeline() -> RAGPipeline:
         if app.state.pipeline is None:
@@ -102,6 +106,28 @@ def create_app(
             app.state.pipeline = factory(settings)
         return app.state.pipeline
 
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Build (or load) the index before serving so /health reports the chunk count and the
+        # first /ask does not pay the indexing cost.
+        get_pipeline()
+        yield
+
+    app = FastAPI(
+        title="docs-rag",
+        version=__version__,
+        docs_url="/api-docs",
+        redoc_url=None,
+        openapi_url="/openapi.json",
+        lifespan=lifespan,
+    )
+    app.state.settings = settings
+    app.state.pipeline = pipeline
+    app.state.pipeline_factory = pipeline_factory
+    app.state.rate_limiter = rate_limiter or RateLimiter(
+        settings.rate_limit_per_minute, settings.rate_limit_burst
+    )
+
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
@@ -109,18 +135,34 @@ def create_app(
     @app.get("/health")
     def health() -> dict[str, Any]:
         pipe = app.state.pipeline
+        cap = pipe.cost_cap if pipe is not None else None
         return {
             "status": "ok",
             "version": __version__,
             "provider": settings.resolved_llm_provider(),
             "chunks": len(pipe.index.chunks) if pipe is not None else None,
+            "daily_cost_cap_usd": settings.daily_cost_cap_usd,
+            "spent_today_usd": round(cap.spent_today, 6) if cap is not None else None,
+            "cache": pipe.cache.kind if pipe is not None and pipe.cache is not None else None,
         }
 
     @app.post("/ask", response_model=AskResponse)
     def ask(body: AskRequest, request: Request) -> AskResponse:
+        ip = client_ip(request)
+        allowed, retry_after = app.state.rate_limiter.allow(ip)
+        if not allowed:
+            raise HTTPException(
+                status_code=429,
+                detail="rate limit exceeded",
+                headers={"Retry-After": str(max(1, int(retry_after + 0.999)))},
+            )
         pipe = get_pipeline()
         try:
-            result = pipe.ask(body.question)
+            result = pipe.ask(body.question, user_id=ip)
+        except CostCapError as exc:
+            raise HTTPException(
+                status_code=429, detail=str(exc), headers={"Retry-After": "3600"}
+            ) from exc
         except Exception as exc:  # pragma: no cover - defensive
             log.exception("ask failed")
             raise HTTPException(status_code=500, detail=str(exc)) from exc

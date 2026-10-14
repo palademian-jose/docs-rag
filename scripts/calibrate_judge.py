@@ -1,8 +1,9 @@
 """Calibrate the judge against hand labels in evals/human_labels.jsonl.
 
-Reports Cohen's kappa and raw agreement between judge verdicts and human labels (rows with
-``human_pass`` filled in), a position-swap consistency check (does reversing the context order
-change the verdict?) and a length-bias check (does the judge favour long answers?).
+For every criterion that has human labels (``labels: {criterion: true|false}``) the script
+reports Cohen's kappa and raw agreement between judge verdicts and the humans, a position-swap
+consistency check (does reversing the context order change the verdict?) and a length-bias
+check (does the judge favour long answers?).
 
     uv run python scripts/calibrate_judge.py --out reports/judge_calibration.md
 """
@@ -21,14 +22,23 @@ from docs_rag.evals.calibration import (
     length_bias,
     position_swap_consistency,
 )
-from docs_rag.evals.judge import get_judge
+from docs_rag.evals.judge import Judge, get_judge
 from docs_rag.settings import get_settings
+
+
+def verdict(judge: Judge, criterion: str, row: dict) -> bool:
+    inp = {"question": row["question"]}
+    out = {"answer": row["answer"], "context": row.get("context", [])}
+    ref = {"answer": row["expected_answer"]} if row.get("expected_answer") else None
+    return bool(judge.judge(criterion, inp, out, ref)["pass"])
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--labels", type=Path, default=Path("evals/human_labels.jsonl"))
-    parser.add_argument("--criterion", default="faithfulness")
+    parser.add_argument(
+        "--criteria", default="faithfulness,answer_relevance", help="comma-separated"
+    )
     parser.add_argument("--out", type=Path, default=Path("reports/judge_calibration.md"))
     args = parser.parse_args()
     logging.basicConfig(level=logging.WARNING)
@@ -41,60 +51,60 @@ def main() -> None:
         if line.strip()
     ]
     rows = [r for r in rows if not r.get("refused")]
-    verdicts: dict[str, bool] = {}
-    for row in rows:
-        inp = {"question": row["question"]}
-        out = {"answer": row["answer"], "context": row.get("context", [])}
-        ref = {"answer": row["expected_answer"]} if row.get("expected_answer") else None
-        verdicts[row["id"]] = bool(judge.judge(args.criterion, inp, out, ref)["pass"])
+    criteria = [c.strip() for c in args.criteria.split(",") if c.strip()]
 
-    labelled = [r for r in rows if r.get("human_pass") is not None]
-    human = [bool(r["human_pass"]) for r in labelled]
-    machine = [verdicts[r["id"]] for r in labelled]
-    kappa = cohen_kappa(human, machine) if labelled else None
-    agree = agreement(human, machine) if labelled else None
-    swap = position_swap_consistency(judge, args.criterion, rows)
-    bias = length_bias([verdicts[r["id"]] for r in rows], [len(r["answer"]) for r in rows])
-
-    disagreements = [r for r, h, m in zip(labelled, human, machine, strict=True) if h != m]
-    kappa_text = "n/a - no labels yet" if kappa is None else f"{kappa:.3f}"
-    agree_text = "n/a" if agree is None else f"{agree:.3f}"
     lines = [
         "# Judge calibration",
         "",
         f"Generated {datetime.now(UTC).isoformat(timespec='seconds')} by "
-        f"`scripts/calibrate_judge.py` (judge: **{judge.name}**, criterion: `{args.criterion}`, "
-        f"provider: {settings.resolved_llm_provider()}).",
+        f"`scripts/calibrate_judge.py` (judge: **{judge.name}**, provider: "
+        f"{settings.resolved_llm_provider()}, {len(rows)} answered rows in `{args.labels}`).",
         "",
-        "| check | value | n |",
-        "|---|---|---|",
-        f"| Cohen's kappa (judge vs human) | {kappa_text} | {len(labelled)} |",
-        f"| raw agreement | {agree_text} | {len(labelled)} |",
-        f"| position-swap consistency | {swap:.3f} | {len(rows)} |",
-        f"| mean answer length, judge PASS / FAIL | {bias['mean_length_pass']} / "
-        f"{bias['mean_length_fail']} | {len(rows)} |",
-        f"| length bias (point-biserial r) | {bias['point_biserial']:+.3f} | {len(rows)} |",
-        "",
-        "Interpretation: kappa above 0.6 is substantial agreement, 0.4-0.6 moderate, below 0.4 the "
-        "judge should not be trusted for this criterion. Position-swap consistency should be close "
-        "to 1.0. A length-bias correlation above +0.3 means the judge rewards verbosity.",
+        "| criterion | kappa | agreement | labelled n | position-swap consistency | "
+        "mean len PASS / FAIL | length bias r |",
+        "|---|---|---|---|---|---|---|",
     ]
-    if not labelled:
+    disagreements: list[str] = []
+    for criterion in criteria:
+        verdicts = {r["id"]: verdict(judge, criterion, r) for r in rows}
+        labelled = [r for r in rows if r.get("labels", {}).get(criterion) is not None]
+        human = [bool(r["labels"][criterion]) for r in labelled]
+        machine = [verdicts[r["id"]] for r in labelled]
+        kappa = f"{cohen_kappa(human, machine):.3f}" if labelled else "n/a"
+        agree = f"{agreement(human, machine):.3f}" if labelled else "n/a"
+        swap = position_swap_consistency(judge, criterion, rows)
+        bias = length_bias([verdicts[r["id"]] for r in rows], [len(r["answer"]) for r in rows])
+        lines.append(
+            f"| {criterion} | {kappa} | {agree} | {len(labelled)} | {swap:.3f} | "
+            f"{bias['mean_length_pass']} / {bias['mean_length_fail']} | "
+            f"{bias['point_biserial']:+.3f} |"
+        )
+        for r, h, m in zip(labelled, human, machine, strict=True):
+            if h != m:
+                disagreements.append(
+                    f"- `{r['id']}` ({criterion}) human={h} judge={m}: {r['question']} -> "
+                    f"{r['answer'][:140]!r}"
+                )
+
+    lines += [
+        "",
+        "Interpretation: kappa above 0.6 is substantial agreement, 0.4-0.6 moderate, below 0.4 "
+        "the judge should not be trusted for that criterion. Position-swap consistency should be "
+        "close to 1.0. A length-bias correlation above +0.3 means the judge rewards verbosity. "
+        "Kappa is undefined when every label is identical; it is reported as 1.0 only when the "
+        "judge also agrees on every row.",
+    ]
+    if not any(r.get("labels", {}).get(c) is not None for r in rows for c in criteria):
         lines += [
             "",
-            f"No human labels yet: fill in `human_pass` (true/false) in `{args.labels}` for the "
-            "rows marked for verification, then re-run this script.",
+            f"No human labels yet: fill in `labels.<criterion>` (true/false) in `{args.labels}` "
+            "for the rows marked for verification, then re-run this script.",
         ]
     if disagreements:
-        lines += ["", "## Disagreements", ""]
-        for r in disagreements:
-            lines.append(
-                f"- `{r['id']}` human={r['human_pass']} judge={verdicts[r['id']]}: "
-                f"{r['question']} -> {r['answer'][:140]!r}"
-            )
+        lines += ["", "## Disagreements", "", *disagreements]
     report = "\n".join(lines) + "\n"
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(report, encoding="utf-8")
+    args.out.write_text(report, encoding="utf-8", newline="\n")
     print(report)
 
 

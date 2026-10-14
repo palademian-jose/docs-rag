@@ -79,7 +79,7 @@ class FakeLLMClient:
                     text="",
                     tool_calls=[call],
                     usage=Usage(input_tokens=in_tokens, output_tokens=8),
-                    model=model or self.model,
+                    model=self.model,
                     stop_reason="tool_use",
                 )
                 response.latency_ms = (time.perf_counter() - start) * 1000
@@ -90,7 +90,7 @@ class FakeLLMClient:
             response = LLMResponse(
                 text=text,
                 usage=Usage(input_tokens=in_tokens, output_tokens=approx_tokens(text)),
-                model=model or self.model,
+                model=self.model,
             )
         response.latency_ms = (time.perf_counter() - start) * 1000
         return response
@@ -111,13 +111,13 @@ class FakeLLMClient:
                 text=item.get("text", ""),
                 tool_calls=[call],
                 usage=Usage(input_tokens=in_tokens, output_tokens=approx_tokens(json.dumps(item))),
-                model=model or self.model,
+                model=self.model,
                 stop_reason="tool_use",
             )
         return LLMResponse(
             text=item,
             usage=Usage(input_tokens=in_tokens, output_tokens=approx_tokens(item)),
-            model=model or self.model,
+            model=self.model,
         )
 
     def _extractive_answer(self, question: str, chunks: list[ContextChunk]) -> str:

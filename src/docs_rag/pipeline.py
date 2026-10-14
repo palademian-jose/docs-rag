@@ -1,20 +1,31 @@
-"""The question-answering pipeline: retrieve -> (rerank) -> generate with citations -> refuse."""
+"""The question-answering pipeline: cache -> retrieve -> rerank -> generate -> cite -> refuse.
+
+Every stage emits a trace span (PLAN.md shared contract 2) and every paid call is priced from
+pricing.json, so an ``AskResult`` carries its own cost and trace id.
+"""
 
 from __future__ import annotations
 
 import time
-import uuid
 from typing import Protocol
 
 from pydantic import BaseModel, Field
 
+from docs_rag.cache import AnswerCache, cache_key
 from docs_rag.generation.answer import REFUSAL_MESSAGE, Citation, parse_answer
 from docs_rag.generation.prompt import ContextChunk, build_messages
 from docs_rag.ingest.index import Index
-from docs_rag.llm.base import LLMClient
+from docs_rag.limits import DailyCostCap
+from docs_rag.llm.base import LLMClient, LLMResponse
+from docs_rag.pricing import PriceBook
 from docs_rag.rerank.base import Reranker
 from docs_rag.retrieval.types import RetrievedChunk
 from docs_rag.settings import Settings
+from docs_rag.tracing import Tracer
+
+
+class CostCapError(RuntimeError):
+    """Raised when the daily USD cap has been spent; the API maps it to HTTP 429."""
 
 
 class Retriever(Protocol):
@@ -30,6 +41,7 @@ class PipelineConfig(BaseModel):
     max_tokens: int = 512
     model: str | None = None
     cache_enabled: bool = False
+    cache_ttl_seconds: int = 3600
 
     @classmethod
     def from_settings(cls, settings: Settings) -> PipelineConfig:
@@ -39,6 +51,7 @@ class PipelineConfig(BaseModel):
             refusal_threshold=settings.refusal_threshold,
             model=settings.llm_model,
             cache_enabled=settings.cache_enabled,
+            cache_ttl_seconds=settings.cache_ttl_seconds,
         )
 
 
@@ -58,6 +71,9 @@ class AskResult(BaseModel):
     input_tokens: int = 0
     output_tokens: int = 0
 
+    def cacheable(self) -> dict:
+        return self.model_dump(exclude={"trace_id", "latency_ms", "cache_hit"})
+
 
 class RAGPipeline:
     def __init__(
@@ -68,26 +84,64 @@ class RAGPipeline:
         config: PipelineConfig | None = None,
         *,
         reranker: Reranker | None = None,
+        tracer: Tracer | None = None,
+        cache: AnswerCache | None = None,
+        pricing: PriceBook | None = None,
+        cost_cap: DailyCostCap | None = None,
     ) -> None:
         self.index = index
         self.llm = llm
         self.retriever = retriever
         self.reranker = reranker
         self.config = config or PipelineConfig()
+        self.tracer = tracer or Tracer(None, enabled=False)
+        self.cache = cache
+        self.pricing = pricing or PriceBook({})
+        self.cost_cap = cost_cap
+
+    @property
+    def fingerprint(self) -> str:
+        """Identifies the configuration; part of the cache key so config changes miss."""
+        reranker = self.reranker.name if self.reranker else "none"
+        return "|".join(
+            [
+                self.retriever.name,
+                reranker,
+                str(self.config.model),
+                self.index.embedder.model_name,
+                f"{self.index.chunk_size}/{self.index.chunk_overlap}",
+                f"top{self.config.top_k}/cand{self.config.candidates}",
+                f"thr{self.config.refusal_threshold}",
+            ]
+        )
 
     # -- stages -------------------------------------------------------------------------------
     def retrieve(self, question: str) -> list[RetrievedChunk]:
-        return self.retriever.retrieve(question, self.config.candidates)
+        with self.tracer.span("retrieve", "retrieval", retriever=self.retriever.name) as span:
+            candidates = self.retriever.retrieve(question, self.config.candidates)
+            span.meta["n_candidates"] = len(candidates)
+            span.meta["top_ids"] = [c.chunk_id for c in candidates[:5]]
+        return candidates
 
     def select_context(
         self, question: str, candidates: list[RetrievedChunk]
-    ) -> list[RetrievedChunk]:
-        """Two-stage retrieval: recall ``candidates`` then rerank down to ``top_k``."""
-        if self.reranker is None:
-            return candidates[: self.config.top_k]
-        return self.reranker.rerank(question, candidates, self.config.top_k)
+    ) -> tuple[list[RetrievedChunk], float]:
+        """Two-stage retrieval: recall ``candidates`` then rerank down to ``top_k``.
 
-    def generate(self, question: str, context: list[RetrievedChunk]):
+        Returns the context and the cost of the rerank call.
+        """
+        if self.reranker is None:
+            return candidates[: self.config.top_k], 0.0
+        with self.tracer.span("rerank", "rerank", model=self.reranker.model_name) as span:
+            context = self.reranker.rerank(question, candidates, self.config.top_k)
+            span.model = self.reranker.model_name
+            span.cost_usd = self.pricing.call_cost(self.reranker.model_name, 1)
+            span.meta["n_in"] = len(candidates)
+            span.meta["n_out"] = len(context)
+            span.meta["top_score"] = context[0].score if context else None
+        return context, span.cost_usd
+
+    def generate(self, question: str, context: list[RetrievedChunk]) -> tuple[LLMResponse, float]:
         ctx = [
             ContextChunk(
                 c.chunk.chunk_id,
@@ -99,40 +153,99 @@ class RAGPipeline:
             for c in context
         ]
         messages = build_messages(question, ctx)
-        return self.llm.complete(
-            messages, model=self.config.model, max_tokens=self.config.max_tokens
-        )
+        with self.tracer.span("generate", "llm", model=self.config.model) as span:
+            response = self.llm.complete(
+                messages, model=self.config.model, max_tokens=self.config.max_tokens
+            )
+            computed = self.pricing.token_cost(
+                response.model, response.usage.input_tokens, response.usage.output_tokens
+            )
+            cost = (
+                response.reported_cost_usd if response.reported_cost_usd is not None else computed
+            )
+            span.model = response.model
+            span.input_tokens = response.usage.input_tokens
+            span.output_tokens = response.usage.output_tokens
+            span.cost_usd = cost
+            span.meta["computed_cost_usd"] = computed
+            span.meta["reported_cost_usd"] = response.reported_cost_usd
+            span.meta["stop_reason"] = response.stop_reason
+            span.meta["provider"] = getattr(self.llm, "provider", None)
+        return response, cost
 
     # -- entry point --------------------------------------------------------------------------
-    def ask(self, question: str) -> AskResult:
+    def ask(
+        self, question: str, *, user_id: str = "anon", session_id: str | None = None
+    ) -> AskResult:
         start = time.perf_counter()
-        trace_id = str(uuid.uuid4())
-        candidates = self.retrieve(question)
-        context = self.select_context(question, candidates)
-        confidence = context[0].score if context else 0.0
-        result = AskResult(
-            answer=REFUSAL_MESSAGE,
-            trace_id=trace_id,
-            confidence=confidence,
-            retrieved_ids=[c.chunk_id for c in candidates],
-            context_ids=[c.chunk_id for c in context],
-        )
-        # The confidence gate only applies to reranker scores, which are calibrated to [0, 1].
-        # Raw retrieval scores (cosine, BM25, RRF) are not comparable across retrievers, so
-        # without a reranker the model's own NOT_IN_DOCS refusal is the only gate.
-        gated = self.reranker is not None and confidence < self.config.refusal_threshold
-        if not context or gated:
-            result.refused = True
-            result.refusal_reason = "low_retrieval_confidence" if context else "no_context"
-        else:
-            response = self.generate(question, context)
-            parsed = parse_answer(response.text, [c.chunk for c in context])
-            result.answer = parsed.answer
-            result.citations = parsed.citations
-            result.refused = parsed.refused
-            result.refusal_reason = parsed.refusal_reason
-            result.model = response.model
-            result.input_tokens = response.usage.input_tokens
-            result.output_tokens = response.usage.output_tokens
-        result.latency_ms = (time.perf_counter() - start) * 1000
-        return result
+        with (
+            self.tracer.trace() as trace_id,
+            self.tracer.span("rag.ask", "other", user_id=user_id, session_id=session_id) as root,
+        ):
+            key = cache_key(question, self.fingerprint)
+            if self.config.cache_enabled and self.cache is not None:
+                with self.tracer.span("cache.lookup", "cache", user_id=user_id) as cs:
+                    hit = self.cache.get(key)
+                    cs.cache_hit = hit is not None
+                if hit is not None:
+                    result = AskResult(**hit, trace_id=trace_id, cache_hit=True)
+                    result.cost_usd = 0.0
+                    result.latency_ms = (time.perf_counter() - start) * 1000
+                    root.cache_hit = True
+                    root.meta.update(refused=result.refused, cached=True)
+                    return result
+
+            if self.cost_cap is not None and not self.cost_cap.allow():
+                root.status = "error"
+                root.error_kind = "CostCapError"
+                raise CostCapError(
+                    f"daily cost cap of ${self.cost_cap.cap_usd:.2f} reached "
+                    f"(spent ${self.cost_cap.spent_today:.4f})"
+                )
+
+            candidates = self.retrieve(question)
+            context, rerank_cost = self.select_context(question, candidates)
+            confidence = context[0].score if context else 0.0
+            result = AskResult(
+                answer=REFUSAL_MESSAGE,
+                trace_id=trace_id,
+                confidence=confidence,
+                retrieved_ids=[c.chunk_id for c in candidates],
+                context_ids=[c.chunk_id for c in context],
+                cost_usd=rerank_cost,
+            )
+            # The confidence gate only applies to reranker scores, which are calibrated to
+            # [0, 1]. Raw retrieval scores (cosine, BM25, RRF) are not comparable across
+            # retrievers, so without a reranker the model's own NOT_IN_DOCS refusal is the gate.
+            gated = self.reranker is not None and confidence < self.config.refusal_threshold
+            if not context or gated:
+                result.refused = True
+                result.refusal_reason = "low_retrieval_confidence" if context else "no_context"
+            else:
+                response, gen_cost = self.generate(question, context)
+                parsed = parse_answer(response.text, [c.chunk for c in context])
+                result.answer = parsed.answer
+                result.citations = parsed.citations
+                result.refused = parsed.refused
+                result.refusal_reason = parsed.refusal_reason
+                result.model = response.model
+                result.input_tokens = response.usage.input_tokens
+                result.output_tokens = response.usage.output_tokens
+                result.cost_usd = round(result.cost_usd + gen_cost, 8)
+
+            if self.cost_cap is not None:
+                self.cost_cap.record(result.cost_usd)
+            if self.config.cache_enabled and self.cache is not None:
+                self.cache.set(key, result.cacheable(), self.config.cache_ttl_seconds)
+            result.latency_ms = (time.perf_counter() - start) * 1000
+            root.cost_usd = result.cost_usd
+            root.input_tokens = result.input_tokens
+            root.output_tokens = result.output_tokens
+            root.model = result.model
+            root.meta.update(
+                refused=result.refused,
+                refusal_reason=result.refusal_reason,
+                n_citations=len(result.citations),
+                confidence=round(confidence, 4),
+            )
+            return result

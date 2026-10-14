@@ -5,7 +5,9 @@ Real provider: the CHEAP_MODEL writes a natural question answerable only from th
 
 Outputs
   evals/golden/questions.jsonl   PLAN.md golden format, source="synthetic"
-  evals/human_labels.jsonl       ~20% sample with the pipeline's answer, for hand labelling
+  evals/human_labels.jsonl       ~20% sample with the pipeline's answer, for hand labelling.
+                                 Each row has ``labels: {criterion: true|false|null}``;
+                                 existing labels are kept when the stored answer is unchanged.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ from pathlib import Path
 
 from docs_rag.bootstrap import build_pipeline
 from docs_rag.evals.golden import Expected, GoldenCase, load_golden, save_golden
+from docs_rag.evals.judge import CRITERIA
 from docs_rag.ingest.chunking import Chunk
 from docs_rag.ingest.index import load_or_build_index
 from docs_rag.llm import Message, get_client
@@ -25,6 +28,7 @@ from docs_rag.settings import get_settings
 from docs_rag.textutil import content_tokens, split_sentences
 
 log = logging.getLogger("build_eval_set")
+LABEL_CRITERIA = tuple(c for c in CRITERIA if c != "context_relevance")
 
 
 def key_sentence(chunk: Chunk) -> str | None:
@@ -133,39 +137,38 @@ def main() -> None:
                 row = json.loads(line)
                 existing[row["id"]] = row
     handwritten = Path("evals/golden/handwritten.jsonl")
-    extra = (
-        [c for c in load_golden(handwritten) if not c.expected.refuse]
-        if handwritten.exists()
-        else []
-    )
+    extra: list[GoldenCase] = []
+    if handwritten.exists():
+        extra = [c for c in load_golden(handwritten) if not c.expected.refuse]
     sample = cases[:: args.sample_every] + extra
 
-    pipeline = build_pipeline(settings, index=index)
+    pipeline = build_pipeline(settings, index=index, cache_enabled=False)
     rows: list[dict] = []
     for case in sample:
         result = pipeline.ask(case.question)
         context = [pipeline.index.by_id[c.chunk_id].text for c in result.citations]
         prev = existing.get(case.id)
         keep = prev is not None and prev.get("answer") == result.answer
+        prev_labels = (prev or {}).get("labels", {}) if keep else {}
         rows.append(
             {
                 "id": case.id,
-                "criterion": "faithfulness",
+                "source": case.source,
                 "question": case.question,
                 "expected_answer": case.expected.answer,
                 "answer": result.answer,
                 "refused": result.refused,
                 "context": context,
-                "human_pass": prev.get("human_pass") if keep else None,
-                "verified": bool(prev.get("verified")) if keep else False,
-                "notes": prev.get("notes", "") if keep else "",
+                "labels": {c: prev_labels.get(c) for c in LABEL_CRITERIA},
+                "verified": bool((prev or {}).get("verified")) if keep else False,
+                "notes": (prev or {}).get("notes", "") if keep else "",
             }
         )
     args.labels.parent.mkdir(parents=True, exist_ok=True)
-    with args.labels.open("w", encoding="utf-8") as fh:
+    with args.labels.open("w", encoding="utf-8", newline="\n") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-    labelled = sum(1 for r in rows if r["human_pass"] is not None)
+    labelled = sum(1 for r in rows if any(v is not None for v in r["labels"].values()))
     log.info(
         "wrote %d rows for hand verification to %s (%d labelled)", len(rows), args.labels, labelled
     )
