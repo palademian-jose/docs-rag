@@ -45,7 +45,7 @@ calibrate:        ## judge calibration against evals/human_labels.jsonl
 
 traces:           ## replay the golden set in 4 serving configs -> traces/scenarios/, then the before/after table
 	$(UV) run python scripts/trace_scenarios.py
-	$(UV) run llmops before-after --dirs "traces/scenarios/*" --md reports/before_after.md --title "docs-rag serving scenarios (fake provider, projected cost)"
+	$(UV) run llmops before-after --dirs "traces/scenarios/*" --md reports/before_after.md --title "docs-rag serving scenarios (fake provider, projected cost)" --note "Fake provider: the spans come from real docs-rag pipeline runs over one shared request stream, but the LLM has no real latency or bill. Cost per 1k requests is PROJECTED (observed tokens at list price: claude-sonnet-4.5, claude-haiku-4.5 for cheaper_model, reranker billed as rerank-v3.5); p50/p95 are pipeline compute only; cache hit rates are set by the replay."
 
 docker:           ## build the container image
 	docker build --build-context llm-evalops=../llm-evalops -t docs-rag:latest .
