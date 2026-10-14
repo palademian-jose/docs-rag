@@ -7,6 +7,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from llmops.pricing import estimate_cost
+
 from docs_rag.evals.golden import GoldenCase, is_relevant
 from docs_rag.evals.judge import Judge
 from docs_rag.evals.metrics import (
@@ -19,7 +21,6 @@ from docs_rag.evals.metrics import (
     recall_at_k,
 )
 from docs_rag.pipeline import RAGPipeline
-from docs_rag.pricing import PriceBook
 
 K_VALUES = (5, 20, 50)
 
@@ -135,7 +136,6 @@ def run_eval(
     model: str,
     config: dict[str, Any] | None = None,
     k_values: tuple[int, ...] = K_VALUES,
-    pricing: PriceBook | None = None,
     price_model: str | None = None,
 ) -> dict[str, Any]:
     scored = [score_case(pipeline, case, judge, k_values=k_values) for case in cases]
@@ -145,11 +145,11 @@ def run_eval(
         source: aggregate([c for c in scored if c["source"] == source])
         for source in sorted({c["source"] for c in scored})
     }
-    if pricing is not None and price_model:
-        metrics["projected_cost_per_1k_usd"] = project_cost(scored, pricing, price_model)
+    if price_model:
+        metrics["projected_cost_per_1k_usd"] = project_cost(scored, price_model)
         for source, group in by_source.items():
             group["projected_cost_per_1k_usd"] = project_cost(
-                [c for c in scored if c["source"] == source], pricing, price_model
+                [c for c in scored if c["source"] == source], price_model
             )
     return {
         "run_id": f"{run_name}-{stamp}-{uuid.uuid4().hex[:6]}",
@@ -168,9 +168,9 @@ def run_eval(
     }
 
 
-def project_cost(cases: list[dict[str, Any]], pricing: PriceBook, model: str) -> float:
+def project_cost(cases: list[dict[str, Any]], model: str) -> float:
     """USD per 1k queries if the observed token counts were billed at ``model`` list price."""
     if not cases:
         return 0.0
-    total = sum(pricing.token_cost(model, c["input_tokens"], c["output_tokens"]) for c in cases)
+    total = sum(estimate_cost(model, c["input_tokens"], c["output_tokens"]) or 0.0 for c in cases)
     return round(total / len(cases) * 1000, 4)

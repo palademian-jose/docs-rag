@@ -1,12 +1,22 @@
+"""Pricing is llmops' pricing.json; these tests pin the contract docs-rag relies on."""
+
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+from llmops.pricing import bundled_pricing_path, estimate_cost, load_pricing, normalize_model
 
-from docs_rag.pricing import PriceBook, load_pricing
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_pricing_file_has_required_models() -> None:
-    book = load_pricing("pricing.json")
+def test_no_local_copy_of_the_price_table() -> None:
+    assert not (REPO_ROOT / "pricing.json").exists(), "pricing.json lives in llm-evalops"
+    assert bundled_pricing_path().name == "pricing.json"
+
+
+def test_bundled_table_has_the_models_docs_rag_uses() -> None:
+    table = load_pricing()
     for model in (
         "anthropic/claude-sonnet-4.5",
         "anthropic/claude-haiku-4.5",
@@ -18,35 +28,30 @@ def test_pricing_file_has_required_models() -> None:
         "text-embedding-3-large",
         "text-embedding-3-small",
         "rerank-v3.5",
+        "fake-extractive-v1",
+        "fake-hashed-bow-256",
+        "fake-lexical-overlap",
     ):
-        assert book.lookup(model) is not None, model
+        assert normalize_model(model, table) in table, model
 
 
-def test_token_cost_math() -> None:
-    book = PriceBook({"m": {"input_per_m": 3.0, "output_per_m": 15.0}})
-    assert book.token_cost("m", 1_000_000, 0) == pytest.approx(3.0)
-    assert book.token_cost("m", 0, 1_000_000) == pytest.approx(15.0)
-    assert book.token_cost("m", 1000, 500) == pytest.approx(0.003 + 0.0075)
-    assert book.token_cost("m", 0, 0) == 0.0
+def test_token_cost_math_and_vendor_prefix_fallback() -> None:
+    assert estimate_cost("anthropic/claude-sonnet-4.5", 1_000_000, 0) == pytest.approx(3.0)
+    assert estimate_cost("claude-sonnet-4-5", 0, 1_000_000) == pytest.approx(15.0)
+    assert estimate_cost("claude-sonnet-4-5-20250929", 1000, 500) == pytest.approx(0.0105)
+    assert estimate_cost("unknown/model", 1000, 1000) is None
 
 
-def test_lookup_fallbacks() -> None:
-    book = PriceBook({"claude-sonnet-4-5": {"input_per_m": 3.0, "output_per_m": 15.0}})
-    assert book.lookup("anthropic/claude-sonnet-4.5") is not None  # strip vendor + dots
-    assert book.lookup("claude-sonnet-4-5-20250929") is not None  # dated snapshot
-    assert book.lookup("unknown/model") is None
-    assert "unknown/model" in book.unknown
-    assert book.token_cost("unknown/model", 1000, 1000) == 0.0
-    assert book.lookup(None) is None
-
-
-def test_per_call_pricing() -> None:
-    book = load_pricing("pricing.json")
-    assert book.call_cost("rerank-v3.5", 1) == pytest.approx(0.002)
-    assert book.call_cost("cohere/rerank-v3.5", 10) == pytest.approx(0.02)
-    assert book.call_cost("fake-lexical-overlap", 5) == 0.0
+def test_rerank_is_priced_per_search() -> None:
+    assert estimate_cost("rerank-v3.5", searches=1) == pytest.approx(0.002)
+    assert estimate_cost("cohere/rerank-v3.5", searches=10) == pytest.approx(0.02)
+    assert estimate_cost("fake-lexical-overlap", searches=5) == 0.0
 
 
 def test_fake_models_are_free() -> None:
-    book = load_pricing("pricing.json")
-    assert book.token_cost("fake-extractive-v1", 10_000, 10_000) == 0.0
+    assert estimate_cost("fake-extractive-v1", 10_000, 10_000) == 0.0
+
+
+def test_price_table_override_through_the_environment(priced_models) -> None:
+    assert estimate_cost("fake-extractive-v1", 1_000_000, 0) == pytest.approx(3.0)
+    assert estimate_cost("fake-lexical-overlap", searches=1) == pytest.approx(0.002)

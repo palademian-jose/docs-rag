@@ -21,7 +21,6 @@ from docs_rag.evals.golden import load_golden, resolve_answer_lines
 from docs_rag.evals.judge import get_judge
 from docs_rag.evals.runner import run_eval
 from docs_rag.ingest.index import load_or_build_index
-from docs_rag.pricing import load_pricing
 from docs_rag.settings import Settings, get_settings
 
 VARIANTS: dict[str, dict] = {
@@ -83,7 +82,7 @@ def results_table(results: dict[str, dict], settings: Settings) -> str:
         )
         + "\nSynthetic questions are templated from the chunk they target and therefore "
         "overstate recall; the `human` rows are the honest ones. `$/1k (projected)` prices the "
-        "observed token counts at the configured model's list price in pricing.json."
+        "observed token counts at the configured model's list price in llmops' pricing.json."
     )
     return "\n".join(parts) + note + "\n"
 
@@ -111,7 +110,6 @@ def main() -> None:
 
     index = load_or_build_index(settings)
     judge = get_judge(settings)
-    pricing = load_pricing(str(settings.pricing_path))
     args.out.mkdir(parents=True, exist_ok=True)
     modes = list(VARIANTS) if args.mode == "all" else [args.mode]
     results: dict[str, dict] = {}
@@ -129,7 +127,6 @@ def main() -> None:
             cases,
             judge,
             run_name=mode,
-            pricing=pricing,
             price_model=settings.llm_model,
             provider=settings.resolved_llm_provider(),
             model=settings.llm_model

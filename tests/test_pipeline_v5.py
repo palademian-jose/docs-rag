@@ -3,32 +3,25 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from llmops.pricing import estimate_cost
 
 from docs_rag.bootstrap import build_pipeline
 from docs_rag.cache import MemoryAnswerCache
 from docs_rag.limits import DailyCostCap
 from docs_rag.llm import FakeLLMClient
 from docs_rag.pipeline import CostCapError, PipelineConfig, RAGPipeline
-from docs_rag.pricing import PriceBook
 from docs_rag.rerank.fake import FakeReranker
 from docs_rag.retrieval.bm25 import BM25Retriever
 from docs_rag.retrieval.dense import DenseRetriever
 from docs_rag.retrieval.hybrid import HybridRetriever
-from docs_rag.tracing import Tracer, read_spans
+from docs_rag.tracing import JsonlSink, make_tracer, read_spans
 
-PRICES = PriceBook(
-    {
-        "fake-extractive-v1": {"input_per_m": 3.0, "output_per_m": 15.0},
-        "fake-lexical-overlap": {"input_per_m": 0, "output_per_m": 0, "per_call": 0.002},
-        "fake-hashed-bow-256": {"input_per_m": 0.13, "output_per_m": 0.0},
-    }
-)
 QUESTION = "How long does the canary receive 5% of traffic?"
 
 
 def _pipeline(corpus_index, tmp_path: Path, **kwargs) -> RAGPipeline:
-    tracer = kwargs.pop("tracer", Tracer(tmp_path / "spans.jsonl"))
-    dense = DenseRetriever(corpus_index, tracer=tracer, pricing=PRICES)
+    tracer = kwargs.pop("tracer", make_tracer(tmp_path / "spans.jsonl"))
+    dense = DenseRetriever(corpus_index, tracer=tracer)
     hybrid = HybridRetriever(dense, BM25Retriever(corpus_index.chunks))
     config = kwargs.pop(
         "config", PipelineConfig(top_k=5, candidates=50, refusal_threshold=0.15, cache_enabled=True)
@@ -40,12 +33,11 @@ def _pipeline(corpus_index, tmp_path: Path, **kwargs) -> RAGPipeline:
         config,
         reranker=FakeReranker(),
         tracer=tracer,
-        pricing=PRICES,
         **kwargs,
     )
 
 
-def test_spans_cover_every_stage_with_cost(corpus_index, tmp_path: Path) -> None:
+def test_spans_cover_every_stage_with_cost(corpus_index, tmp_path: Path, priced_models) -> None:
     pipeline = _pipeline(corpus_index, tmp_path, cache=MemoryAnswerCache())
     result = pipeline.ask(QUESTION)
     spans = read_spans(tmp_path / "spans.jsonl")
@@ -58,11 +50,15 @@ def test_spans_cover_every_stage_with_cost(corpus_index, tmp_path: Path) -> None
     assert all(s["parent_span_id"] is not None for s in spans[:-1])
     gen = next(s for s in spans if s["name"] == "generate")
     assert gen["kind"] == "llm" and gen["input_tokens"] > 0
-    expected_gen = PRICES.token_cost(
-        "fake-extractive-v1", gen["input_tokens"], gen["output_tokens"]
-    )
+    expected_gen = estimate_cost("fake-extractive-v1", gen["input_tokens"], gen["output_tokens"])
+    assert expected_gen and expected_gen > 0
     assert gen["cost_usd"] == pytest.approx(expected_gen)
-    assert gen["meta"]["computed_cost_usd"] == pytest.approx(expected_gen)
+    assert gen["meta"]["cost_computed_usd"] == pytest.approx(expected_gen)
+    assert gen["meta"]["cost_source"] == "computed" and gen["meta"]["cost_reported_usd"] is None
+    assert gen["meta"]["gen_ai.system"] == "fake"
+    assert {s["feature"] for s in spans} == {"rag.answer"}
+    embed = next(s for s in spans if s["name"] == "embed.query")
+    assert embed["cost_usd"] > 0 and embed["input_tokens"] > 0
     rerank = next(s for s in spans if s["name"] == "rerank")
     assert rerank["cost_usd"] == pytest.approx(0.002)
     assert result.cost_usd == pytest.approx(expected_gen + 0.002)
@@ -107,7 +103,9 @@ def test_cache_disabled_never_touches_cache(corpus_index, tmp_path: Path) -> Non
     assert len(cache) == 0 and len(pipeline.llm.calls) == 2
 
 
-def test_cost_cap_blocks_new_calls_but_serves_cache(corpus_index, tmp_path: Path) -> None:
+def test_cost_cap_blocks_new_calls_but_serves_cache(
+    corpus_index, tmp_path: Path, priced_models
+) -> None:
     cap = DailyCostCap(0.005)
     pipeline = _pipeline(corpus_index, tmp_path, cache=MemoryAnswerCache(), cost_cap=cap)
     first = pipeline.ask(QUESTION)
@@ -123,11 +121,12 @@ def test_cost_cap_blocks_new_calls_but_serves_cache(corpus_index, tmp_path: Path
 
 def test_build_pipeline_wires_everything(settings) -> None:
     pipeline = build_pipeline(settings)
-    assert pipeline.tracer.enabled and pipeline.cache is not None
+    assert isinstance(pipeline.tracer.sink, JsonlSink) and pipeline.cache is not None
     assert pipeline.cost_cap is not None and pipeline.reranker is not None
     assert pipeline.retriever.name == "hybrid"
     result = pipeline.ask(QUESTION)
     assert not result.refused and result.cost_usd == 0.0  # fake models are free
     assert settings.trace_path.exists()
+    assert {s["feature"] for s in read_spans(settings.trace_path)} == {"rag.answer"}
     naive = build_pipeline(settings, index=pipeline.index, retrieval_mode="dense", reranker="none")
     assert naive.retriever.name == "dense" and naive.reranker is None

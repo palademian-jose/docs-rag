@@ -64,8 +64,9 @@ class Settings(BaseSettings):
     rate_limit_burst: int = 10
 
     # Tracing
+    # Prices come from llmops (llm-evalops/src/llmops/pricing.json); llmops reads PRICING_PATH
+    # from the environment itself when you want to override the file.
     trace_path: Path = Path("traces/spans.jsonl")
-    pricing_path: Path = Path("pricing.json")
 
     def has_key(self, provider: str) -> bool:
         return {

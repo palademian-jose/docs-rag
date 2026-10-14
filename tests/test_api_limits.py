@@ -7,11 +7,8 @@ from docs_rag.cache import MemoryAnswerCache
 from docs_rag.limits import DailyCostCap, RateLimiter
 from docs_rag.llm import FakeLLMClient
 from docs_rag.pipeline import PipelineConfig, RAGPipeline
-from docs_rag.pricing import PriceBook
 from docs_rag.rerank.fake import FakeReranker
 from docs_rag.retrieval.dense import DenseRetriever
-
-PRICES = PriceBook({"fake-extractive-v1": {"input_per_m": 3.0, "output_per_m": 15.0}})
 
 
 def _pipeline(corpus_index, cap: DailyCostCap) -> RAGPipeline:
@@ -23,7 +20,6 @@ def _pipeline(corpus_index, cap: DailyCostCap) -> RAGPipeline:
         config,
         reranker=FakeReranker(),
         cache=MemoryAnswerCache(),
-        pricing=PRICES,
         cost_cap=cap,
     )
 
@@ -47,7 +43,9 @@ def test_rate_limit_returns_429_with_retry_after(settings, corpus_index) -> None
     assert client.post("/ask", json=body).status_code == 200
 
 
-def test_cost_cap_returns_429_and_health_reports_spend(settings, corpus_index) -> None:
+def test_cost_cap_returns_429_and_health_reports_spend(
+    settings, corpus_index, priced_models
+) -> None:
     cap = DailyCostCap(0.0001)
     app = create_app(settings, _pipeline(corpus_index, cap))
     client = TestClient(app)

@@ -1,7 +1,8 @@
 """The question-answering pipeline: cache -> retrieve -> rerank -> generate -> cite -> refuse.
 
-Every stage emits a trace span (PLAN.md shared contract 2) and every paid call is priced from
-pricing.json, so an ``AskResult`` carries its own cost and trace id.
+Every stage emits a trace span (PLAN.md shared contract 2) through ``llmops.tracing`` and every
+paid call is priced from llmops' ``pricing.json``, so an ``AskResult`` carries its own cost and
+trace id.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import time
 from typing import Protocol
 
+from llmops.pricing import estimate_cost
 from pydantic import BaseModel, Field
 
 from docs_rag.cache import AnswerCache, cache_key
@@ -17,11 +19,10 @@ from docs_rag.generation.prompt import ContextChunk, build_messages
 from docs_rag.ingest.index import Index
 from docs_rag.limits import DailyCostCap
 from docs_rag.llm.base import LLMClient, LLMResponse
-from docs_rag.pricing import PriceBook
 from docs_rag.rerank.base import Reranker
 from docs_rag.retrieval.types import RetrievedChunk
 from docs_rag.settings import Settings
-from docs_rag.tracing import Tracer
+from docs_rag.tracing import FEATURE, Tracer, null_tracer, wrap_client
 
 
 class CostCapError(RuntimeError):
@@ -86,17 +87,16 @@ class RAGPipeline:
         reranker: Reranker | None = None,
         tracer: Tracer | None = None,
         cache: AnswerCache | None = None,
-        pricing: PriceBook | None = None,
         cost_cap: DailyCostCap | None = None,
     ) -> None:
         self.index = index
-        self.llm = llm
         self.retriever = retriever
         self.reranker = reranker
         self.config = config or PipelineConfig()
-        self.tracer = tracer or Tracer(None, enabled=False)
+        self.tracer = tracer or null_tracer()
+        # Every complete() becomes one costed `generate` llm span (llmops.tracing.wrap_client).
+        self.llm = wrap_client(llm, self.tracer, name="generate", feature=FEATURE)
         self.cache = cache
-        self.pricing = pricing or PriceBook({})
         self.cost_cap = cost_cap
 
     @property
@@ -135,7 +135,7 @@ class RAGPipeline:
         with self.tracer.span("rerank", "rerank", model=self.reranker.model_name) as span:
             context = self.reranker.rerank(question, candidates, self.config.top_k)
             span.model = self.reranker.model_name
-            span.cost_usd = self.pricing.call_cost(self.reranker.model_name, 1)
+            span.cost_usd = estimate_cost(self.reranker.model_name, searches=1) or 0.0
             span.meta["n_in"] = len(candidates)
             span.meta["n_out"] = len(context)
             span.meta["top_score"] = context[0].score if context else None
@@ -153,24 +153,18 @@ class RAGPipeline:
             for c in context
         ]
         messages = build_messages(question, ctx)
-        with self.tracer.span("generate", "llm", model=self.config.model) as span:
-            response = self.llm.complete(
-                messages, model=self.config.model, max_tokens=self.config.max_tokens
-            )
-            computed = self.pricing.token_cost(
-                response.model, response.usage.input_tokens, response.usage.output_tokens
-            )
+        response = self.llm.complete(
+            messages, model=self.config.model, max_tokens=self.config.max_tokens
+        )
+        # Same rule the llm span used: the provider-reported cost wins over tokens x list price.
+        cost = response.cost_usd
+        if cost is None:
             cost = (
-                response.reported_cost_usd if response.reported_cost_usd is not None else computed
+                estimate_cost(
+                    response.model, response.usage.input_tokens, response.usage.output_tokens
+                )
+                or 0.0
             )
-            span.model = response.model
-            span.input_tokens = response.usage.input_tokens
-            span.output_tokens = response.usage.output_tokens
-            span.cost_usd = cost
-            span.meta["computed_cost_usd"] = computed
-            span.meta["reported_cost_usd"] = response.reported_cost_usd
-            span.meta["stop_reason"] = response.stop_reason
-            span.meta["provider"] = getattr(self.llm, "provider", None)
         return response, cost
 
     # -- entry point --------------------------------------------------------------------------
@@ -179,12 +173,12 @@ class RAGPipeline:
     ) -> AskResult:
         start = time.perf_counter()
         with (
-            self.tracer.trace() as trace_id,
-            self.tracer.span("rag.ask", "other", user_id=user_id, session_id=session_id) as root,
+            self.tracer.trace(feature=FEATURE, user_id=user_id, session_id=session_id) as trace_id,
+            self.tracer.span("rag.ask", "other") as root,
         ):
             key = cache_key(question, self.fingerprint)
             if self.config.cache_enabled and self.cache is not None:
-                with self.tracer.span("cache.lookup", "cache", user_id=user_id) as cs:
+                with self.tracer.span("cache.lookup", "cache") as cs:
                     hit = self.cache.get(key)
                     cs.cache_hit = hit is not None
                 if hit is not None:

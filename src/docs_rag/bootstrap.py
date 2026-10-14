@@ -8,11 +8,10 @@ from docs_rag.limits import DailyCostCap
 from docs_rag.llm import get_client
 from docs_rag.llm.base import LLMClient
 from docs_rag.pipeline import PipelineConfig, RAGPipeline
-from docs_rag.pricing import PriceBook, load_pricing
 from docs_rag.rerank import get_reranker
 from docs_rag.retrieval import build_retriever
 from docs_rag.settings import Settings, get_settings
-from docs_rag.tracing import Tracer
+from docs_rag.tracing import Tracer, make_tracer
 
 
 def build_pipeline(
@@ -26,7 +25,6 @@ def build_pipeline(
     cache_enabled: bool | None = None,
     tracer: Tracer | None = None,
     cache: AnswerCache | None = None,
-    pricing: PriceBook | None = None,
     cost_cap: DailyCostCap | None = None,
 ) -> RAGPipeline:
     """Build a pipeline.
@@ -40,15 +38,12 @@ def build_pipeline(
     config = config or PipelineConfig.from_settings(settings)
     if cache_enabled is not None:
         config = config.model_copy(update={"cache_enabled": cache_enabled})
-    tracer = tracer or Tracer(settings.trace_path)
-    pricing = pricing or load_pricing(str(settings.pricing_path))
+    tracer = tracer or make_tracer(settings.trace_path)
     if cache is None and config.cache_enabled:
         cache = get_cache(settings.redis_url)
     if cost_cap is None:
         cost_cap = DailyCostCap(settings.daily_cost_cap_usd)
-    retriever = build_retriever(
-        index, settings, mode=retrieval_mode, tracer=tracer, pricing=pricing
-    )
+    retriever = build_retriever(index, settings, mode=retrieval_mode, tracer=tracer)
     return RAGPipeline(
         index,
         llm,
@@ -57,6 +52,5 @@ def build_pipeline(
         reranker=get_reranker(settings, kind=reranker),
         tracer=tracer,
         cache=cache,
-        pricing=pricing,
         cost_cap=cost_cap,
     )

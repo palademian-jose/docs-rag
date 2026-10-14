@@ -125,5 +125,5 @@ class OpenAICompatClient:
             model=resp.model or model_id,
             latency_ms=latency_ms,
             stop_reason=choice.finish_reason or "stop",
-            reported_cost_usd=reported_cost,
+            cost_usd=reported_cost,
         )

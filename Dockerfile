@@ -37,14 +37,12 @@ WORKDIR /app
 COPY --from=builder --chown=app:app /app/.venv /app/.venv
 COPY --chown=app:app src ./src
 COPY --chown=app:app data/corpus ./data/corpus
-COPY --chown=app:app pricing.json ./
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     CORPUS_PATH=/app/data/corpus \
     INDEX_PATH=/app/data/index/index.npz \
-    TRACE_PATH=/app/traces/spans.jsonl \
-    PRICING_PATH=/app/pricing.json
+    TRACE_PATH=/app/traces/spans.jsonl
 
 RUN mkdir -p /app/data/index /app/traces && chown -R app:app /app/data /app/traces
 USER app

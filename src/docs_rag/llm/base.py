@@ -47,8 +47,9 @@ class LLMResponse(BaseModel):
     model: str
     latency_ms: float = 0.0
     stop_reason: str = "end_turn"
-    # Provider-reported cost in USD when available (OpenRouter returns usage.cost).
-    reported_cost_usd: float | None = None
+    # Provider-reported cost in USD when available (OpenRouter returns usage.cost). The field
+    # name matches llmops.llm.types.LLMResponse, which llmops.tracing.wrap_client reads.
+    cost_usd: float | None = None
 
 
 @runtime_checkable
