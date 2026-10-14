@@ -24,3 +24,4 @@ data/index/
 # Generated reports (keep the committed baseline)
 reports/*.json
 !reports/baseline.json
+reports/gate.md
