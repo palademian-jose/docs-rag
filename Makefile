@@ -37,8 +37,8 @@ eval:             ## evaluate naive / hybrid / reranked / final and write report
 sweep:            ## chunk size / overlap sweep -> reports/chunk_sweep.md
 	$(UV) run python scripts/sweep_chunks.py
 
-gate:             ## regression gate against reports/baseline.json
-	$(UV) run python scripts/gate.py --baseline reports/baseline.json --candidate reports/eval-latest.json --config evals.yaml
+gate:             ## regression gate against reports/baseline.json (evalkit gate)
+	$(UV) run evalkit gate --baseline reports/baseline.json --candidate reports/eval-latest.json --config evals.yaml --md reports/gate.md
 
 calibrate:        ## judge calibration against evals/human_labels.jsonl
 	$(UV) run python scripts/calibrate_judge.py

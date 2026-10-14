@@ -1,4 +1,4 @@
-"""Golden sets, metrics, judges, eval runner, regression gate and judge calibration."""
+"""Golden sets, metrics, judges, eval runner and judge calibration (the gate is `evalkit gate`)."""
 
 from docs_rag.evals.golden import Expected, GoldenCase, is_relevant, load_golden, save_golden
 from docs_rag.evals.judge import Judge, LexicalJudge, LLMJudge, get_judge

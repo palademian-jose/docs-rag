@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from evalkit.gate import evaluate_gate, load_gate_config
+from evalkit.io import load_eval_result, write_eval_result
+from evalkit.types import EvalResult
 
 from docs_rag.evals.calibration import (
     agreement,
@@ -13,73 +15,58 @@ from docs_rag.evals.calibration import (
     length_bias,
     position_swap_consistency,
 )
-from docs_rag.evals.gate import evaluate_gate, load_gate_config, render_markdown
 from docs_rag.evals.judge import LexicalJudge
 
-CONFIG = {
-    "faithfulness": {"min": 0.85, "max_drop": 0.05},
-    "recall_at_20": {"min": 0.80, "max_drop": 0.05},
-    "hallucination": {"max": 0.10, "max_rise": 0.05},
-}
+BASELINE = Path("reports/baseline.json")
 
 
-def _result(**metrics: float) -> dict:
-    return {"metrics": metrics}
+def _result(base: dict, **metrics: float) -> EvalResult:
+    return EvalResult(run_id="candidate", metrics={**base["metrics"], **metrics})
 
 
-def test_gate_passes_when_within_thresholds() -> None:
-    base = _result(faithfulness=0.90, recall_at_20=0.85, hallucination=0.05)
-    cand = _result(faithfulness=0.88, recall_at_20=0.86, hallucination=0.06)
-    ok, rows = evaluate_gate(base, cand, CONFIG)
-    assert ok and all(r.ok for r in rows)
-    md = render_markdown(rows, ok=ok)
-    assert "**Gate: PASS**" in md and "| faithfulness |" in md
+def _baseline() -> EvalResult:
+    return load_eval_result(BASELINE)
+
+
+def test_evals_yaml_is_an_evalkit_gate_config() -> None:
+    cfg = load_gate_config(Path("evals.yaml"))  # extra="forbid": a stale `max_rise` would raise
+    assert {"faithfulness", "recall_at_20", "hallucination", "task_success"} <= set(cfg.metrics)
+    assert cfg.metrics["hallucination"].max_increase == 0.05
+    baseline = _baseline()
+    assert set(cfg.metrics) <= set(baseline.metrics)
+
+
+def test_committed_baseline_passes_its_own_gate() -> None:
+    baseline = _baseline()
+    report = evaluate_gate(baseline, baseline, load_gate_config(Path("evals.yaml")))
+    assert report.ok, report.to_markdown()
 
 
 def test_gate_fails_on_drop_min_and_rise() -> None:
-    base = _result(faithfulness=0.95, recall_at_20=0.85, hallucination=0.02)
-    cand = _result(faithfulness=0.88, recall_at_20=0.70, hallucination=0.09)
-    ok, rows = evaluate_gate(base, cand, CONFIG)
-    assert not ok
-    by_metric = {r.metric: r for r in rows}
-    assert not by_metric["faithfulness"].ok and "dropped" in by_metric["faithfulness"].note
-    assert not by_metric["recall_at_20"].ok and "below min" in by_metric["recall_at_20"].note
-    assert not by_metric["hallucination"].ok and "rose" in by_metric["hallucination"].note
-    assert "**Gate: FAIL**" in render_markdown(rows, ok=ok)
-
-
-def test_gate_without_baseline_and_missing_metric() -> None:
-    cand = _result(faithfulness=0.90, recall_at_20=0.85)
-    ok, rows = evaluate_gate(None, cand, CONFIG)
-    assert not ok
-    by_metric = {r.metric: r for r in rows}
-    assert by_metric["faithfulness"].ok and "no baseline" in by_metric["faithfulness"].note
-    assert not by_metric["hallucination"].ok and "missing" in by_metric["hallucination"].note
-
-
-def test_gate_config_file_and_cli(tmp_path: Path) -> None:
     cfg = load_gate_config(Path("evals.yaml"))
-    assert "faithfulness" in cfg and "recall_at_20" in cfg
-    base = tmp_path / "base.json"
-    cand = tmp_path / "cand.json"
-    base.write_text(json.dumps(_result(faithfulness=0.9, recall_at_20=0.9, hallucination=0.0)))
-    cand.write_text(json.dumps(_result(faithfulness=0.5, recall_at_20=0.9, hallucination=0.0)))
-    proc = subprocess.run(
-        [
-            sys.executable,
-            "scripts/gate.py",
-            "--baseline",
-            str(base),
-            "--candidate",
-            str(cand),
-            "--config",
-            "evals.yaml",
-        ],
-        capture_output=True,
-        text=True,
+    baseline = _baseline()
+    candidate = _result(
+        baseline.model_dump(), faithfulness=0.5, recall_at_20=0.7, hallucination=0.3
     )
+    report = evaluate_gate(baseline, candidate, cfg)
+    failed = {r.metric: r.reason for r in report.violations}
+    assert set(failed) == {"faithfulness", "recall_at_20", "hallucination"}
+    assert "dropped" in failed["faithfulness"] and "< min" in failed["recall_at_20"]
+    assert "> max" in failed["hallucination"] and "rose" in failed["hallucination"]
+
+
+def test_evalkit_gate_cli_exits_1_on_regression(tmp_path: Path) -> None:
+    baseline = _baseline()
+    bad = tmp_path / "bad.json"
+    write_eval_result(bad, _result(baseline.model_dump(), faithfulness=0.5))
+    cmd = [sys.executable, "-m", "evalkit.cli", "gate", "--baseline", str(BASELINE)]
+    cmd += ["--config", "evals.yaml"]
+    proc = subprocess.run([*cmd, "--candidate", str(bad)], capture_output=True, text=True)
     assert proc.returncode == 1, proc.stdout + proc.stderr
-    assert "FAIL" in proc.stdout
+    assert "GATE FAILED" in proc.stdout and "faithfulness" in proc.stdout
+    ok = subprocess.run([*cmd, "--candidate", str(BASELINE)], capture_output=True, text=True)
+    assert ok.returncode == 0, ok.stdout + ok.stderr
+    assert "GATE PASSED" in ok.stdout
 
 
 def test_cohen_kappa_known_values() -> None:

@@ -1,14 +1,16 @@
-# Regression gate thresholds, consumed by scripts/gate.py (later: evalkit gate).
-# min / max are absolute bounds on the candidate; max_drop / max_rise bound the change
-# against reports/baseline.json. Values below were set from the fake-provider baseline and
-# should be re-tuned after the first real-provider run.
+# Regression gate thresholds, read by `evalkit gate` (llm-evalops): `make gate`, and the CI eval job.
+# min / max are absolute bounds on the candidate; max_drop (higher-is-better metrics) and
+# max_increase (lower-is-better metrics) bound the change against reports/baseline.json.
+# evalkit's config names the lower-is-better delta `max_increase`; the pre-integration gate called
+# it `max_rise`. Values below were set from the fake-provider baseline and should be re-tuned
+# after the first real-provider run.
 metrics:
   recall_at_20: {min: 0.80, max_drop: 0.05}
   precision_at_5: {min: 0.20, max_drop: 0.05}
   faithfulness: {min: 0.85, max_drop: 0.05}
-  hallucination: {max: 0.15, max_rise: 0.05}
+  hallucination: {max: 0.15, max_increase: 0.05}
   # The extractive fake answers two "in-domain but absent" questions it should refuse
   # (6/8 = 0.625); raise this once a real model is in the loop.
   refusal_recall: {min: 0.60, max_drop: 0.10}
-  false_refusal_rate: {max: 0.20, max_rise: 0.05}
+  false_refusal_rate: {max: 0.20, max_increase: 0.05}
   task_success: {min: 0.70, max_drop: 0.05}
